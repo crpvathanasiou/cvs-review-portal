@@ -1,0 +1,27 @@
+{
+  "schema_version": "1",
+  "run_id": "run-alt-model",
+  "dataset_id": "demo-chest",
+  "dataset_version": "v1",
+  "model": {
+    "model_id": "demo-classifier-b",
+    "model_name": "Demo Classifier B",
+    "model_version": "2.1.0",
+    "description": "Alternate synthetic model configuration."
+  },
+  "model_parameters": {
+    "threshold": 0.4,
+    "augment": true
+  },
+  "preprocessing": {
+    "resize": [
+      256,
+      256
+    ]
+  },
+  "execution_description": "Second execution on the same dataset version.",
+  "executed_at": "2026-03-01T11:00:00+00:00",
+  "predictions_artifact": "predictions.json",
+  "metrics_artifact": null,
+  "evaluation_snapshot_artifact": null
+}

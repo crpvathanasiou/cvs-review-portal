@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CVS Review Portal</title>
+    <link rel="stylesheet" href="/ui-assets/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main-content">Skip to content</a>
+
+    <header class="app-header">
+      <div class="header-inner">
+        <h1 class="brand">CVS Review Portal</h1>
+        <p class="header-subtitle">Research review of exported datasets and model runs</p>
+      </div>
+    </header>
+
+    <main id="main-content" class="app-main">
+      <section class="selection-bar" aria-label="Dataset and run selection">
+        <div class="selection-row">
+          <label class="field">
+            <span class="field-label">Dataset / version</span>
+            <select id="dataset-select" disabled>
+              <option value="">Loading datasets…</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">Run</span>
+            <select id="run-select" disabled>
+              <option value="">Dataset only — no run selected</option>
+            </select>
+          </label>
+          <div class="selection-status" id="selection-status" aria-live="polite"></div>
+        </div>
+        <p class="selection-meta" id="dataset-meta"></p>
+      </section>
+
+      <div id="global-banner" class="banner" hidden></div>
+
+      <div class="tabs" role="tablist" aria-label="Portal views">
+        <button
+          type="button"
+          class="tab active"
+          role="tab"
+          id="tab-analytical"
+          aria-controls="panel-analytical"
+          aria-selected="true"
+          data-tab="analytical"
+        >
+          Analytical
+        </button>
+        <button
+          type="button"
+          class="tab"
+          role="tab"
+          id="tab-summary"
+          aria-controls="panel-summary"
+          aria-selected="false"
+          data-tab="summary"
+          tabindex="-1"
+        >
+          Summary
+        </button>
+        <button
+          type="button"
+          class="tab"
+          role="tab"
+          id="tab-executive"
+          aria-controls="panel-executive"
+          aria-selected="false"
+          data-tab="executive"
+          tabindex="-1"
+        >
+          Executive Summary
+        </button>
+      </div>
+
+      <section
+        id="panel-analytical"
+        class="tab-panel active"
+        role="tabpanel"
+        aria-labelledby="tab-analytical"
+      >
+        <div id="run-info-panel" class="run-info-panel" hidden></div>
+        <div class="analytical-toolbar">
+          <button type="button" id="add-frames-btn" class="btn btn-primary" disabled>
+            + Add frames
+          </button>
+          <p class="toolbar-hint" id="analytical-hint"></p>
+        </div>
+        <div id="frame-cards" class="frame-cards"></div>
+        <div id="analytical-empty" class="empty-state" hidden></div>
+      </section>
+
+      <section
+        id="panel-summary"
+        class="tab-panel"
+        role="tabpanel"
+        aria-labelledby="tab-summary"
+        hidden
+      >
+        <div id="summary-draft-notice" class="notice" hidden></div>
+        <div class="summary-toolbar">
+          <label class="field field-grow">
+            <span class="field-label">Search</span>
+            <input
+              type="search"
+              id="summary-search"
+              placeholder="Search by image ID, labels, comments…"
+              autocomplete="off"
+            />
+          </label>
+          <p class="row-count" id="summary-row-count" aria-live="polite"></p>
+        </div>
+        <div id="summary-table-wrap" class="table-wrap"></div>
+      </section>
+
+      <section
+        id="panel-executive"
+        class="tab-panel"
+        role="tabpanel"
+        aria-labelledby="tab-executive"
+        hidden
+      >
+        <div id="executive-draft-notice" class="notice" hidden></div>
+        <div id="executive-content" class="executive-content"></div>
+      </section>
+    </main>
+
+    <!-- Add-frames picker -->
+    <div
+      id="picker-modal"
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="picker-title"
+      hidden
+    >
+      <div class="modal-backdrop" data-close="picker"></div>
+      <div class="modal-panel picker-panel">
+        <header class="modal-header">
+          <h2 id="picker-title">Add frames</h2>
+          <button type="button" class="btn btn-ghost" data-close="picker" aria-label="Close">
+            Close
+          </button>
+        </header>
+        <label class="field">
+          <span class="field-label">Search by image ID</span>
+          <input type="search" id="picker-search" autocomplete="off" />
+        </label>
+        <div id="picker-grid" class="picker-grid"></div>
+        <footer class="modal-footer">
+          <p id="picker-selection-count" class="muted"></p>
+          <div class="footer-actions">
+            <button type="button" class="btn btn-ghost" data-close="picker">Cancel</button>
+            <button type="button" id="picker-add-btn" class="btn btn-primary" disabled>
+              Add selected
+            </button>
+          </div>
+        </footer>
+      </div>
+    </div>
+
+    <!-- Image zoom / pan viewer -->
+    <div
+      id="viewer-modal"
+      class="modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="viewer-title"
+      hidden
+    >
+      <div class="modal-backdrop" data-close="viewer"></div>
+      <div class="modal-panel viewer-panel">
+        <header class="modal-header">
+          <h2 id="viewer-title">Image viewer</h2>
+          <button type="button" class="btn btn-ghost" data-close="viewer" aria-label="Close viewer">
+            Close
+          </button>
+        </header>
+        <div class="viewer-toolbar" role="toolbar" aria-label="Zoom controls">
+          <button type="button" id="viewer-fit" class="btn btn-secondary">Fit</button>
+          <button type="button" id="viewer-100" class="btn btn-secondary">100%</button>
+          <button type="button" id="viewer-zoom-out" class="btn btn-secondary" aria-label="Zoom out">
+            −
+          </button>
+          <button type="button" id="viewer-zoom-in" class="btn btn-secondary" aria-label="Zoom in">
+            +
+          </button>
+          <button type="button" id="viewer-reset" class="btn btn-secondary">Reset</button>
+          <span id="viewer-zoom-label" class="zoom-label" aria-live="polite">100%</span>
+        </div>
+        <div id="viewer-stage" class="viewer-stage" tabindex="0">
+          <img id="viewer-image" alt="" draggable="false" />
+          <p id="viewer-error" class="viewer-error" hidden>Image failed to load.</p>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/ui-assets/register_save_logic.mjs"></script>
+    <script src="/ui-assets/app.js" defer></script>
+  </body>
+</html>

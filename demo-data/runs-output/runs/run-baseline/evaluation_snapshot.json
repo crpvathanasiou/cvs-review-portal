@@ -1,0 +1,17 @@
+{
+  "schema_version": "1",
+  "evaluated_images": [
+    {
+      "image_id": "img-001",
+      "ground_truth": 0
+    },
+    {
+      "image_id": "img-002",
+      "ground_truth": 1
+    },
+    {
+      "image_id": "img-003",
+      "ground_truth": 1
+    }
+  ]
+}

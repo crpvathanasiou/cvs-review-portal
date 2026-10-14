@@ -1,0 +1,22 @@
+{
+  "schema_version": "1",
+  "run_id": "run-baseline",
+  "dataset_id": "demo-chest",
+  "dataset_version": "v1",
+  "model": {
+    "model_id": "demo-classifier-a",
+    "model_name": "Demo Classifier A",
+    "model_version": "1.0.0",
+    "description": "Synthetic baseline model description."
+  },
+  "model_parameters": {
+    "threshold": 0.5,
+    "seed": 42
+  },
+  "preprocessing": {},
+  "execution_description": "Synthetic demo execution with metrics.",
+  "executed_at": "2026-03-01T10:15:00+00:00",
+  "predictions_artifact": "predictions.json",
+  "metrics_artifact": "metrics.json",
+  "evaluation_snapshot_artifact": "evaluation_snapshot.json"
+}

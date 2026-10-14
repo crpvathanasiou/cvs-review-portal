@@ -1,0 +1,11 @@
+{
+  "schema_version": "1",
+  "predictions": [
+    {
+      "image_id": "img-002",
+      "predicted_label": 0,
+      "positive_class_probability": 0.05,
+      "description": "Legitimate zero prediction on img-002."
+    }
+  ]
+}

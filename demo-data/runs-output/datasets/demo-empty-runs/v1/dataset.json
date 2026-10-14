@@ -1,0 +1,16 @@
+{
+  "schema_version": "1",
+  "dataset_id": "demo-empty-runs",
+  "dataset_version": "v1",
+  "display_name": "Demo Dataset Without Runs",
+  "description": "Synthetic dataset published with no runs.",
+  "images": [
+    {
+      "image_id": "solo-001",
+      "raw_image_key": "solo-001.png",
+      "ground_truth": 0,
+      "ground_truth_editable": true,
+      "comments": "Only image in a run-less dataset."
+    }
+  ]
+}

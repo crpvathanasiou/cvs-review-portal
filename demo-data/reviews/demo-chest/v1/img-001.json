@@ -1,0 +1,11 @@
+{
+  "schema_version": "1",
+  "dataset_id": "demo-chest",
+  "dataset_version": "v1",
+  "image_id": "img-001",
+  "ground_truth_override": 1,
+  "comments": "",
+  "revision": 3,
+  "actor": "local-dev-reviewer",
+  "updated_at": "2026-10-14T07:11:18.704251Z"
+}

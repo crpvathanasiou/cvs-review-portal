@@ -1,0 +1,30 @@
+{
+  "schema_version": "1",
+  "dataset_id": "demo-chest",
+  "dataset_version": "v1",
+  "display_name": "Demo Chest Dataset",
+  "description": "Synthetic demo dataset \u2014 not patient data.",
+  "images": [
+    {
+      "image_id": "img-001",
+      "raw_image_key": "img-001.png",
+      "ground_truth": 0,
+      "ground_truth_editable": true,
+      "comments": "Baseline negative example."
+    },
+    {
+      "image_id": "img-002",
+      "raw_image_key": "img-002.png",
+      "ground_truth": 1,
+      "ground_truth_editable": false,
+      "comments": null
+    },
+    {
+      "image_id": "img-003",
+      "raw_image_key": "img-003.png",
+      "ground_truth": 1,
+      "ground_truth_editable": true,
+      "comments": "Editable positive example."
+    }
+  ]
+}

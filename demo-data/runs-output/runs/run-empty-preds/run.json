@@ -1,0 +1,19 @@
+{
+  "schema_version": "1",
+  "run_id": "run-empty-preds",
+  "dataset_id": "demo-chest",
+  "dataset_version": "v1",
+  "model": {
+    "model_id": "demo-classifier-empty",
+    "model_name": "Demo Empty Predictions",
+    "model_version": "0.0.1",
+    "description": "Run with an empty prediction collection."
+  },
+  "model_parameters": {},
+  "preprocessing": {},
+  "execution_description": "No predictions published.",
+  "executed_at": "2026-03-01T12:00:00+00:00",
+  "predictions_artifact": "predictions.json",
+  "metrics_artifact": null,
+  "evaluation_snapshot_artifact": null
+}

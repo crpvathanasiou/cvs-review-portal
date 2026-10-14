@@ -1,0 +1,21 @@
+{
+  "schema_version": "1",
+  "run_id": "run-partial-preds",
+  "dataset_id": "demo-chest",
+  "dataset_version": "v1",
+  "model": {
+    "model_id": "demo-classifier-partial",
+    "model_name": "Demo Partial Predictions",
+    "model_version": "0.3.0",
+    "description": "Partial coverage run."
+  },
+  "model_parameters": {
+    "batch": 1
+  },
+  "preprocessing": {},
+  "execution_description": "Only one image predicted.",
+  "executed_at": "2026-03-01T13:00:00+00:00",
+  "predictions_artifact": "predictions.json",
+  "metrics_artifact": null,
+  "evaluation_snapshot_artifact": null
+}
