@@ -32,6 +32,7 @@ def clean_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "STORAGE_BACKEND",
         "AZURE_STORAGE_ACCOUNT_URL",
         "AZURE_BLOB_CONTAINER",
+        "DATASET_LAYOUT",
         "IDENTITY_MODE",
         "DEVELOPMENT_ACTOR",
         "ALLOWED_ACTORS",

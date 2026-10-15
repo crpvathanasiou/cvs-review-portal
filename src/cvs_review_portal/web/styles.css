@@ -547,6 +547,19 @@ textarea:hover:not(:disabled) {
   color: var(--primary);
 }
 
+.label-pill.mixed {
+  background: #f3efe6;
+  color: #5c4b2a;
+}
+
+.summary-interval-header {
+  margin-bottom: 0.85rem;
+}
+
+.summary-interval-header p {
+  margin: 0 0 0.35rem;
+}
+
 .original-gt {
   margin-top: 0.35rem;
   font-size: 0.875rem;
@@ -830,6 +843,17 @@ textarea:hover:not(:disabled) {
 
 .picker-panel .field {
   padding: 0.75rem 1rem 0;
+}
+
+.picker-search-row {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.picker-search-row input[type="search"] {
+  flex: 1;
+  min-width: 0;
 }
 
 .picker-grid {

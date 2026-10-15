@@ -52,7 +52,10 @@ def get_review_service(
 
 def build_portal_store(settings: Settings) -> PortalDataStore:
     if settings.storage_backend == "local":
-        return LocalPortalDataStore(settings.data_root)
+        return LocalPortalDataStore(
+            settings.data_root,
+            dataset_layout=settings.dataset_layout,
+        )
     if settings.storage_backend == "azure_blob":
         account_url = settings.azure_storage_account_url
         container = settings.azure_blob_container
@@ -64,6 +67,7 @@ def build_portal_store(settings: Settings) -> PortalDataStore:
         return AzureBlobPortalDataStore(
             account_url=account_url,
             container_name=container,
+            dataset_layout=settings.dataset_layout,
         )
     raise ConfigurationError(
         "Unsupported storage backend.",

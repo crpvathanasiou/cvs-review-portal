@@ -2,7 +2,7 @@
 
 The CVS Review Portal shows exported surgical datasets and any published CVS Engine results, and it stores **comments-only** human reviews. Ground truth stays read-only. The CVS Engine (preprocessing, inference, metrics) is a separate application.
 
-The current MVP includes comments-only Save, a local filesystem store, an Azure Blob adapter, development and Azure App Service identity adapters, browser caching of raw image bytes, an offline Cholec80 importer, and interval browsing for provenance-backed datasets. Step 2B is owner-accepted for this MVP. Search and frame-navigation latency remain an open limitation. Azure account setup, upload, and deployment have not started.
+The current MVP includes comments-only Save, a local filesystem store, an Azure Blob adapter, development and Azure App Service identity adapters, browser caching of raw image bytes, an offline Cholec80 importer, interval browsing for provenance-backed datasets, and the accepted **video catalog** layout (`videos.csv` + one JSON file per video). The owner has accepted the Azure video-catalog MVP. That acceptance is the owner’s check of Summary, Executive Summary, opening and removing videos/intervals, frame navigation and zoom, and comment Save persistence. It is not exhaustive testing or an external production certification. The deployed image is `cvs-review-portal:video-catalog-20261015-202611` on revision `ca-cvs-portal-dev--0000006` with `DATASET_LAYOUT=video_catalog`. Details, the accepted Summary latency, and what remains future work are in the [handoff](.ai/cvs-review-portal/06_common_handoff.md#azure-checkpoint).
 
 Local portal used for that acceptance: [http://127.0.0.1:18080/](http://127.0.0.1:18080/).
 
@@ -45,7 +45,7 @@ There is no separate architecture-decision file. The proceed-to-Azure decision i
 | Local versus Azure storage, configuration, authentication | [Specification §6.1–§6.2](.ai/cvs-review-portal/08_portal_specification.md#61-storage-backends) |
 | No inference runs for imported Cholec80 | [Specification §5.2.1](.ai/cvs-review-portal/08_portal_specification.md#521-cholec80-export-preparation) |
 | Persisted comments versus browser memory | [Persisted state](#persisted-state-and-browser-memory) below |
-| Owner acceptance, counts, paths, next Azure step | [Handoff](.ai/cvs-review-portal/06_common_handoff.md) |
+| Owner acceptance, counts, completed Azure deployment | [Handoff](.ai/cvs-review-portal/06_common_handoff.md#azure-checkpoint) |
 
 ## Requirements
 
@@ -93,9 +93,9 @@ poetry run pytest
 
 `.\scripts\format.ps1` applies Ruff formatting. It is not part of the check gate.
 
-Previously recorded results, not re-executed for this documentation checkpoint: Ruff check, Ruff format check, Pyright (0 errors), and pytest (including `tests/test_interval_browse.py`) exited 0.
+Recorded check results (Cursor sessions versus external review, and what was not re-run for this documentation update) are in the [handoff](.ai/cvs-review-portal/06_common_handoff.md#verification-and-acceptance). These quality scripts were not executed for this documentation-only update.
 
-JavaScript guard tests are outside `scripts/quality.ps1`. Previously recorded, and not re-executed here: `node --check` on the web modules, and `node --test` with 19 passed (`tests/js/save_async_guards.test.mjs`, `tests/js/interval_nav_save.test.mjs`). PowerShell commands:
+JavaScript guard tests are outside `scripts/quality.ps1`. PowerShell commands:
 
 ```powershell
 node --check src/cvs_review_portal/web/app.js
@@ -103,7 +103,11 @@ node --check src/cvs_review_portal/web/review_save_logic.mjs
 node --check src/cvs_review_portal/web/register_save_logic.mjs
 node --check src/cvs_review_portal/web/interval_browse_logic.mjs
 node --check src/cvs_review_portal/web/register_interval_browse_logic.mjs
-node --test tests/js/save_async_guards.test.mjs tests/js/interval_nav_save.test.mjs
+node --check src/cvs_review_portal/web/video_catalog_picker_logic.mjs
+node --check src/cvs_review_portal/web/register_video_catalog_picker_logic.mjs
+node --check src/cvs_review_portal/web/video_catalog_summary_logic.mjs
+node --check src/cvs_review_portal/web/register_video_catalog_summary_logic.mjs
+node --test tests/js/save_async_guards.test.mjs tests/js/interval_nav_save.test.mjs tests/js/video_catalog_picker.test.mjs tests/js/video_catalog_summary.test.mjs
 ```
 
 ## Import
@@ -147,18 +151,87 @@ Open [http://127.0.0.1:18080/](http://127.0.0.1:18080/). API docs: [http://127.0
 
 With `DATA_ROOT=demo-data` in `.env`, and no session override, this serves the synthetic datasets. Demo generation and this launch path were used in earlier steps. They were not re-executed for this documentation checkpoint.
 
-## Start with imported Cholec80 data
+## Start with imported Cholec80 data (legacy monolithic `dataset.json`)
 
-Keep identity and storage settings in `.env` (from `.env.example`). Override only the data root in the current PowerShell session. Pydantic Settings gives process environment variables precedence over `.env`.
+Keep identity and storage settings in `.env` (from `.env.example`). Override only the data root in the current PowerShell session. Pydantic Settings gives process environment variables precedence over `.env`. Default `DATASET_LAYOUT=legacy` loads the large `dataset.json`.
 
 ```powershell
 $env:DATA_ROOT = "C:\Users\User\cvs-review-portal\cholec80-data"
+$env:DATASET_LAYOUT = "legacy"
 poetry run uvicorn cvs_review_portal.main:app --host 127.0.0.1 --port 18080 --reload
 ```
 
-Open [http://127.0.0.1:18080/](http://127.0.0.1:18080/). The accepted owner session used this host and port with dataset `cholec80` / `v1`.
+Open [http://127.0.0.1:18080/](http://127.0.0.1:18080/).
 
-`--reload` watches code files. It does not reload a changed `DATA_ROOT`. Stop the process and start it again after changing the variable.
+`--reload` watches code files. It does not reload a changed `DATA_ROOT` or `DATASET_LAYOUT`. Stop the process and start it again after changing those variables.
+
+## Video catalog layout (CSV + per-video JSON)
+
+When `DATASET_LAYOUT=video_catalog`, the portal does **not** read the large `dataset.json` at runtime. Active videos come only from:
+
+```text
+runs-output/datasets/{dataset_id}/{dataset_version}/videos.csv
+runs-output/datasets/{dataset_id}/{dataset_version}/videos/{video_id}.json
+```
+
+CSV columns (exact): `video_id,video_name,metadata_path`.  
+`metadata_path` is a relative key from the data root using `/` (no absolute paths or URLs).  
+A header-only CSV means zero active videos. Files present under `videos/` but absent from the CSV are inactive.
+
+### Convert once from an existing `dataset.json`
+
+```powershell
+poetry run python scripts/convert_dataset_to_video_catalog.py `
+  --data-root "C:\Users\User\cvs-review-portal\cholec80-data" `
+  --dataset-id cholec80 `
+  --dataset-version v1 `
+  --active-limit 10 `
+  --all-video-json
+```
+
+This writes JSON for every video and a CSV with the first 10 videos by name. It does not modify `dataset.json`, images, or reviews. It refuses to overwrite an existing `videos.csv` unless `--force-csv` is passed.
+
+Local conversion counts and the ten active video names are in the [handoff](.ai/cvs-review-portal/06_common_handoff.md#data-checkpoint). `dataset.json` stays on disk for conversion and legacy mode. It is not the runtime source when `DATASET_LAYOUT=video_catalog`.
+
+Exact local paths for the accepted checkpoint:
+
+```text
+C:\Users\User\cvs-review-portal\cholec80-data\runs-output\datasets\cholec80\v1\videos.csv
+C:\Users\User\cvs-review-portal\cholec80-data\runs-output\datasets\cholec80\v1\videos\<video_id>.json
+C:\Users\User\cvs-review-portal\cholec80-data\runs-output\datasets\cholec80\v1\dataset.json
+```
+
+### Start the portal on the 10-video selection
+
+Local identity and storage stay in `.env` (copied from [`.env.example`](.env.example)). Required values for this local portal:
+
+```text
+STORAGE_BACKEND=local
+IDENTITY_MODE=development
+DEVELOPMENT_ACTOR=local-dev-reviewer
+ALLOWED_ACTORS=local-dev-reviewer
+```
+
+`IDENTITY_MODE=disabled` fails closed (the UI returns 401). Development identity is loopback-only. It is not production authentication.
+
+Override the data root and layout in the current PowerShell session (these win over `.env`):
+
+```powershell
+$env:DATA_ROOT = "C:\Users\User\cvs-review-portal\cholec80-data"
+$env:DATASET_LAYOUT = "video_catalog"
+poetry run uvicorn cvs_review_portal.main:app --host 127.0.0.1 --port 18080 --reload
+```
+
+Open [http://127.0.0.1:18080/](http://127.0.0.1:18080/). Product behavior (picker, frames, Save, Summary, Executive Summary, image cache) is in [specification §7](.ai/cvs-review-portal/08_portal_specification.md#74-interval-browse) and [§6.3](.ai/cvs-review-portal/08_portal_specification.md#63-image-content-browser-caching).
+
+### Add or remove one video (no rebuild)
+
+Edit only `cholec80-data\runs-output\datasets\cholec80\v1\videos.csv`:
+
+- **Remove:** delete the video’s row → refresh the browser. That video and its intervals disappear from browse/search; image content and Save for its frames return 404 while inactive.
+- **Restore / add:** put the row back (same `video_id`, `video_name`, and `metadata_path` pointing at an existing `videos/<video_id>.json`) → refresh. Saved comments under `reviews/...` are unchanged.
+
+No application restart is required for CSV edits (the small CSV is re-read on relevant requests). Image ID / display ID search may scan active video JSON files sequentially; that happens only on explicit Search/Enter, not while typing a partial video name.
 
 ## Stop, restart, and clear the session override
 
@@ -189,7 +262,7 @@ C:\Users\User\cvs-review-portal\cholec80-data\reviews\cholec80\v1\<image_id>.jso
 
 The importer does not create this directory. The local store creates it on the first Save for an image. A sibling `<image_id>.json.lock` file may remain from the cross-process file lock. That lock file is not the review.
 
-Ground truth, provenance, and image membership stay in `runs-output/datasets/<dataset_id>/<dataset_version>/dataset.json`. Save does not edit that file.
+Ground truth, provenance, and image membership stay in `dataset.json` (legacy layout) or in per-video JSON under `videos/` (video catalog layout). Save does not edit those files. With `DATASET_LAYOUT=video_catalog`, membership is gated by `videos.csv`.
 
 These values exist only in the browser tab (no `localStorage` / `sessionStorage`):
 
@@ -254,7 +327,7 @@ Build context for both `docker build .` and Compose is the repository root. `.do
 
 Azure App Service identity is the deployment mode. It requires the hosting layer described in the [specification](.ai/cvs-review-portal/08_portal_specification.md#62-identity-modes). It is not a local Docker login.
 
-Azure provisioning, a private container upload, application access, deployment, and live verification are not done. See the [handoff](.ai/cvs-review-portal/06_common_handoff.md).
+The video-catalog Azure deployment is complete. Container App revision `ca-cvs-portal-dev--0000006` runs `acrcvsdevvas01-bqe6hec0efcdavf3.azurecr.io/cvs-review-portal:video-catalog-20261015-202611` with `DATASET_LAYOUT=video_catalog`. Blob metadata for this layout is 75 video JSON files plus `videos.csv` (10 active videos, 70 intervals, 10,018 images). The existing image blobs were reused. The previous `step2b-v1` image was not removed. Resource inventory and the owner’s acceptance scope are in the [handoff](.ai/cvs-review-portal/06_common_handoff.md#azure-checkpoint). A stock `docker compose up` is still not that Azure deployment.
 
 ## Packaging note
 

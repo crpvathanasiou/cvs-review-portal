@@ -14,8 +14,11 @@ from cvs_review_portal.domain.models import (
     PredictionsArtifact,
     ReviewRecord,
     RunManifest,
+    VideoArtifact,
+    VideoCatalog,
 )
 from cvs_review_portal.domain.review_document import LoadedReview
+from cvs_review_portal.settings import DatasetLayout
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,9 +44,22 @@ class ReviewMutationResult:
 class PortalDataStore(Protocol):
     """Minimal interface for published portal artifacts and review writes."""
 
+    @property
+    def dataset_layout(self) -> DatasetLayout:
+        """Configured dataset layout: ``legacy`` or ``video_catalog``."""
+        ...
+
     def load_catalog(self) -> Catalog: ...
 
     def load_dataset(self, dataset_id: str, dataset_version: str) -> DatasetVersion: ...
+
+    def load_video_catalog(self, dataset_id: str, dataset_version: str) -> VideoCatalog:
+        """Load and validate ``videos.csv`` (always re-read; sole activation list)."""
+        ...
+
+    def load_video(self, dataset_id: str, dataset_version: str, video_id: str) -> VideoArtifact:
+        """Load one active video's metadata JSON (bounded cache; detects file changes)."""
+        ...
 
     def load_run(self, run_id: str) -> RunManifest: ...
 

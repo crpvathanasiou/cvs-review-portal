@@ -63,22 +63,64 @@
     return `${datasetId}\0${version}`;
   }
 
-  /** @param {string} datasetId @param {string} version @param {string} imageId */
-  function imageContentUrl(datasetId, version, imageId) {
-    return (
-      `/api/datasets/${encodeURIComponent(datasetId)}` +
-      `/versions/${encodeURIComponent(version)}` +
-      `/images/${encodeURIComponent(imageId)}/content`
+  /** @returns {typeof globalThis.CvsVideoCatalogPickerLogic} */
+  function videoCatalogLogic() {
+    const logic = globalThis.CvsVideoCatalogPickerLogic;
+    if (!logic) {
+      throw new Error("Video catalog picker logic module failed to load.");
+    }
+    return logic;
+  }
+
+  function videoCatalogSummaryLogic() {
+    const logic = globalThis.CvsVideoCatalogSummaryLogic;
+    if (!logic) {
+      throw new Error("Video catalog summary logic module failed to load.");
+    }
+    return logic;
+  }
+
+  /**
+   * Stable image content URL. Optional video_id is an ownership hint for
+   * video_catalog direct resolution (not a cache-busting parameter).
+   * @param {string} datasetId @param {string} version @param {string} imageId
+   * @param {string | null} [videoId]
+   */
+  function imageContentUrl(datasetId, version, imageId, videoId) {
+    return videoCatalogLogic().imageContentUrlWithVideo(
+      datasetId,
+      version,
+      imageId,
+      videoId || null,
     );
   }
 
-  /** @param {string} datasetId @param {string} version @param {string} imageId */
-  function reviewUrl(datasetId, version, imageId) {
-    return (
-      `/api/datasets/${encodeURIComponent(datasetId)}` +
-      `/versions/${encodeURIComponent(version)}` +
-      `/images/${encodeURIComponent(imageId)}/review`
+  /**
+   * @param {string} datasetId @param {string} version @param {string} imageId
+   * @param {string | null} [videoId]
+   */
+  function reviewUrl(datasetId, version, imageId, videoId) {
+    return videoCatalogLogic().reviewUrlWithVideo(
+      datasetId,
+      version,
+      imageId,
+      videoId || null,
     );
+  }
+
+  /** Resolve owning video_id from an open interval card when known. */
+  function videoIdForImage(imageId) {
+    for (const open of state.openIntervals) {
+      if (open.videoId && open.currentImage && open.currentImage.image_id === imageId) {
+        return open.videoId;
+      }
+      if (open.videoId && Array.isArray(open.frames)) {
+        if (open.frames.some((frame) => frame.image_id === imageId)) {
+          return open.videoId;
+        }
+      }
+    }
+    return state.selectedVideoId || null;
   }
 
   /** @param {any} image */
@@ -220,6 +262,10 @@
     browseMeta: null,
     /** @type {"interval"|"image"|null} */
     browseMode: null,
+    /** @type {"legacy"|"video_catalog"|null} */
+    datasetLayout: null,
+    /** @type {string | null} currently opened video (video_catalog layout) */
+    selectedVideoId: null,
     /** @type {any[]} */
     runs: [],
     /** @type {string | null} */
@@ -235,6 +281,12 @@
     /** Loaded summary may be stale after comment Saves */
     summaryStale: false,
     summaryLoading: false,
+    /** @type {string | null} last explicit summary load error (shown in-panel) */
+    summaryError: null,
+    /** @type {Array<{ video_id: string, video_name: string }> | null} CSV video rows for picker */
+    videoCatalogList: null,
+    /** When true, picker shows /intervals/search hits instead of CSV filter results. */
+    pickerExplicitImageSearch: false,
     /** @type {string[]} image IDs (image browse mode) */
     openCards: [],
     /**
@@ -244,6 +296,7 @@
      *   segmentId: string,
      *   title: string,
      *   imageCount: number,
+     *   videoId: string | null,
      *   frames: any[] | null,
      *   currentIndex: number,
      *   currentImage: any | null,
@@ -364,6 +417,9 @@
     pickerTitle: document.getElementById("picker-title"),
     pickerSearchLabel: document.getElementById("picker-search-label"),
     pickerSearch: /** @type {HTMLInputElement} */ (document.getElementById("picker-search")),
+    pickerSearchBtn: /** @type {HTMLButtonElement | null} */ (
+      document.getElementById("picker-search-btn")
+    ),
     pickerMatchInfo: document.getElementById("picker-match-info"),
     pickerGrid: document.getElementById("picker-grid"),
     pickerPager: document.getElementById("picker-pager"),
@@ -397,12 +453,11 @@
   // ---------------------------------------------------------------------------
 
   function currentDatasetIdentity() {
-    const meta = state.browseMeta || state.datasetDetail;
-    if (!meta) return null;
-    return {
-      datasetId: meta.dataset_id,
-      datasetVersion: meta.dataset_version,
-    };
+    // video_catalog / interval browse keeps datasetDetail null; use browseMeta.
+    return videoCatalogSummaryLogic().datasetIdentityFromMeta(
+      state.browseMeta,
+      state.datasetDetail,
+    );
   }
 
   function isIntervalBrowse() {
@@ -440,22 +495,29 @@
   }
 
   function syncSummaryLoadBars() {
-    const needsExplicit = isIntervalBrowse();
-    const showLoad = needsExplicit && !state.summaryLoaded;
+    const ui = {
+      browseMode: state.browseMode,
+      summaryLoaded: state.summaryLoaded,
+    };
+    const showLoad = videoCatalogSummaryLogic().shouldShowSummaryLoadBar(ui);
     if (dom.summaryLoadBar) dom.summaryLoadBar.hidden = !showLoad;
     if (dom.executiveLoadBar) dom.executiveLoadBar.hidden = !showLoad;
-    if (dom.summaryToolbar) dom.summaryToolbar.hidden = needsExplicit && !state.summaryLoaded;
+    if (dom.summaryToolbar) {
+      dom.summaryToolbar.hidden = videoCatalogSummaryLogic().shouldHideSummaryToolbar(ui);
+    }
     if (dom.summaryLoadBtn) {
       dom.summaryLoadBtn.disabled = state.summaryLoading;
-      dom.summaryLoadBtn.textContent = state.summaryLoading
-        ? "Loading summary…"
-        : "Load effective summary";
+      dom.summaryLoadBtn.textContent = videoCatalogSummaryLogic().summaryLoadButtonLabel(
+        state.summaryLoading,
+        "effective",
+      );
     }
     if (dom.executiveLoadBtn) {
       dom.executiveLoadBtn.disabled = state.summaryLoading;
-      dom.executiveLoadBtn.textContent = state.summaryLoading
-        ? "Loading summary…"
-        : "Load executive summary";
+      dom.executiveLoadBtn.textContent = videoCatalogSummaryLogic().summaryLoadButtonLabel(
+        state.summaryLoading,
+        "executive",
+      );
     }
     updateSummaryStaleNotices();
   }
@@ -679,12 +741,17 @@
     state.datasetDetail = null;
     state.browseMeta = null;
     state.browseMode = null;
+    state.datasetLayout = null;
+    state.selectedVideoId = null;
     state.runDetail = null;
     state.runOverview = null;
     state.summary = null;
     state.summaryLoaded = false;
     state.summaryStale = false;
     state.summaryLoading = false;
+    state.summaryError = null;
+    state.videoCatalogList = null;
+    state.pickerExplicitImageSearch = false;
     state.runs = [];
     state.openCards = [];
     state.openIntervals = [];
@@ -720,6 +787,8 @@
 
       state.browseMeta = browse;
       state.browseMode = browse.browse_mode === "interval" ? "interval" : "image";
+      state.datasetLayout =
+        browse.dataset_layout === "video_catalog" ? "video_catalog" : "legacy";
       state.runs = Array.isArray(runsView.runs) ? runsView.runs : [];
 
       if (state.browseMode === "interval") {
@@ -729,17 +798,30 @@
         state.summaryLoaded = false;
         state.openIntervals = [];
         state.openCards = [];
+        state.selectedVideoId = null;
         if (dom.addFramesBtn) {
           clearChildren(dom.addFramesBtn);
-          dom.addFramesBtn.appendChild(document.createTextNode("+ Add intervals"));
+          const btnLabel =
+            state.datasetLayout === "video_catalog" ? "+ Open video" : "+ Add intervals";
+          dom.addFramesBtn.appendChild(document.createTextNode(btnLabel));
           dom.addFramesBtn.disabled = false;
         }
         state.loading = false;
-        setSelectionStatus(
-          state.runs.length === 0
-            ? `Interval dataset loaded · ${browse.interval_count} interval(s), ${browse.image_count} image(s) (no published runs).`
-            : `Interval dataset loaded · ${browse.interval_count} interval(s), ${browse.image_count} image(s) · ${state.runs.length} run(s).`,
-        );
+        if (state.datasetLayout === "video_catalog") {
+          const videoCount =
+            typeof browse.video_count === "number" ? browse.video_count : 0;
+          setSelectionStatus(
+            state.runs.length === 0
+              ? `Video catalog loaded · ${videoCount} active video(s) (no published runs). Open a video to load its intervals.`
+              : `Video catalog loaded · ${videoCount} active video(s) · ${state.runs.length} run(s). Open a video to load its intervals.`,
+          );
+        } else {
+          setSelectionStatus(
+            state.runs.length === 0
+              ? `Interval dataset loaded · ${browse.interval_count} interval(s), ${browse.image_count} image(s) (no published runs).`
+              : `Interval dataset loaded · ${browse.interval_count} interval(s), ${browse.image_count} image(s) · ${state.runs.length} run(s).`,
+          );
+        }
         populateRunSelect();
         renderAll();
         return;
@@ -924,17 +1006,30 @@
   async function loadSummaryExplicit(options) {
     const force = Boolean(options && options.force);
     const identity = currentDatasetIdentity();
-    if (!identity) return;
+    if (!identity) {
+      state.summaryError =
+        "No dataset is selected. Choose a dataset, then load the summary again.";
+      state.summaryLoading = false;
+      syncSummaryLoadBars();
+      showBanner(state.summaryError, "error");
+      renderSummary();
+      renderExecutive();
+      return;
+    }
     if (state.summaryLoaded && !state.summaryStale && !force) return;
     const gen = state.selectionGen;
     const runId = state.selectedRunId;
     state.summaryLoading = true;
+    state.summaryError = null;
     syncSummaryLoadBars();
+    renderSummary();
+    renderExecutive();
     try {
-      let path =
-        `/api/datasets/${encodeURIComponent(identity.datasetId)}` +
-        `/versions/${encodeURIComponent(identity.datasetVersion)}/summary`;
-      if (runId) path += `?run_id=${encodeURIComponent(runId)}`;
+      const path = videoCatalogSummaryLogic().summaryApiPath(
+        identity.datasetId,
+        identity.datasetVersion,
+        runId,
+      );
       const summary = await apiGet(path);
       if (gen !== state.selectionGen) return;
       const current = currentDatasetIdentity();
@@ -949,6 +1044,7 @@
       state.summary = summary;
       state.summaryLoaded = true;
       state.summaryStale = false;
+      state.summaryError = null;
       state.summaryLoading = false;
       syncSummaryLoadBars();
       renderSummary();
@@ -956,9 +1052,11 @@
     } catch (err) {
       if (gen !== state.selectionGen) return;
       state.summaryLoading = false;
+      state.summaryError = errorMessage(err) || "Failed to load summary.";
       syncSummaryLoadBars();
-      const msg = errorMessage(err) || "Failed to load summary.";
-      showBanner(msg, "error");
+      showBanner(state.summaryError, "error");
+      renderSummary();
+      renderExecutive();
     }
   }
 
@@ -1061,7 +1159,7 @@
   }
 
   /**
-   * @param {{ segmentId: string, title: string, imageCount: number }} args
+   * @param {{ segmentId: string, title: string, imageCount: number, videoId?: string | null }} args
    */
   function createOpenIntervalCard(args) {
     state.intervalCardSeq += 1;
@@ -1070,6 +1168,7 @@
       segmentId: args.segmentId,
       title: args.title,
       imageCount: args.imageCount,
+      videoId: args.videoId || null,
       frames: null,
       currentIndex: 0,
       currentImage: null,
@@ -1233,7 +1332,8 @@
       baseRevision,
       putReview: apiPutJson,
       getReview: apiGet,
-      reviewUrl,
+      reviewUrl: (datasetId, version, imageId) =>
+        reviewUrl(datasetId, version, imageId, videoIdForImage(imageId)),
       errorMessage,
       applyPersistedReview: applyPersistedReviewToImage,
       refreshSummary: async (token) => {
@@ -1401,25 +1501,26 @@
   function updateDatasetMeta() {
     if (!dom.datasetMeta) return;
     clearChildren(dom.datasetMeta);
-    if (!state.datasetDetail) {
+    const d = state.browseMeta || state.datasetDetail;
+    if (!d) {
       if (state.loading) {
         dom.datasetMeta.appendChild(document.createTextNode("Loading…"));
       }
       return;
     }
-    const d = state.browseMeta || state.datasetDetail;
-    if (!d) return;
     const imageCount =
       typeof d.image_count === "number"
         ? d.image_count
         : Array.isArray(state.datasetDetail && state.datasetDetail.images)
           ? state.datasetDetail.images.length
-          : 0;
-    const parts = [
-      `${d.display_name}`,
-      `${d.dataset_id} / ${d.dataset_version}`,
-      `${imageCount} image(s)`,
-    ];
+          : null;
+    const parts = [`${d.display_name}`, `${d.dataset_id} / ${d.dataset_version}`];
+    if (typeof d.video_count === "number") {
+      parts.push(`${d.video_count} active video(s)`);
+    }
+    if (typeof imageCount === "number") {
+      parts.push(`${imageCount} image(s)`);
+    }
     if (isIntervalBrowse() && typeof d.interval_count === "number") {
       parts.push(`${d.interval_count} interval(s)`);
     }
@@ -1610,16 +1711,26 @@
       empty.appendChild(el("p", { text: "No intervals open in this view." }));
       empty.appendChild(
         el("p", {
-          text: "Use “+ Add intervals” to search by video or image and open interval cards. Removing a card only hides it from this view.",
+          text:
+            state.datasetLayout === "video_catalog"
+              ? "Use “+ Open video” to choose an active video from videos.csv, then open its interval cards. Removing a card only hides it from this view."
+              : "Use “+ Add intervals” to search by video or image and open interval cards. Removing a card only hides it from this view.",
         }),
       );
     }
 
     if (dom.analyticalHint) {
       clearChildren(dom.analyticalHint);
-      const hint = state.selectedRunId
-        ? `Interval browse · predictions for run ${state.selectedRunId} load per selected frame. Reviews stay per image.`
-        : "Interval browse · dataset-only view — predictions are hidden until a run is selected.";
+      let hint;
+      if (state.datasetLayout === "video_catalog") {
+        hint = state.selectedRunId
+          ? `Video catalog · open a video before loading intervals. Predictions for run ${state.selectedRunId} load per selected frame.`
+          : "Video catalog · open a video from the CSV list before loading its intervals.";
+      } else {
+        hint = state.selectedRunId
+          ? `Interval browse · predictions for run ${state.selectedRunId} load per selected frame. Reviews stay per image.`
+          : "Interval browse · dataset-only view — predictions are hidden until a run is selected.";
+      }
       dom.analyticalHint.appendChild(document.createTextNode(hint));
     }
 
@@ -1788,7 +1899,12 @@
     if (open.currentImage && open.status !== "loading" && identity) {
       const imageId = open.currentImage.image_id;
       img.addEventListener("click", () => openViewer(imageId, img));
-      img.src = imageContentUrl(identity.datasetId, identity.datasetVersion, imageId);
+      img.src = imageContentUrl(
+        identity.datasetId,
+        identity.datasetVersion,
+        imageId,
+        open.videoId || null,
+      );
       if (img.complete && img.naturalWidth > 0) markLoaded();
       else if (img.complete && img.naturalWidth === 0 && img.getAttribute("src")) markError();
     }
@@ -1935,20 +2051,25 @@
         return state.imageCache.get(key) || null;
       },
       setCachedImage: cacheImageForIdentity,
-      fetchFrameView: async ({ datasetId, datasetVersion, imageId, runId }) => {
+      fetchFrameView: async ({ datasetId, datasetVersion, imageId, runId, videoId }) => {
         let path =
           `/api/datasets/${encodeURIComponent(datasetId)}` +
           `/versions/${encodeURIComponent(datasetVersion)}` +
           `/images/${encodeURIComponent(imageId)}/view`;
-        if (runId) path += `?run_id=${encodeURIComponent(runId)}`;
+        const params = [];
+        if (runId) params.push(`run_id=${encodeURIComponent(runId)}`);
+        if (videoId) params.push(`video_id=${encodeURIComponent(videoId)}`);
+        if (params.length) path += `?${params.join("&")}`;
         return apiGet(path);
       },
-      fetchIntervalFrames: async ({ datasetId, datasetVersion, segmentId }) =>
-        apiGet(
+      fetchIntervalFrames: async ({ datasetId, datasetVersion, segmentId, videoId }) => {
+        let path =
           `/api/datasets/${encodeURIComponent(datasetId)}` +
-            `/versions/${encodeURIComponent(datasetVersion)}` +
-            `/intervals/${encodeURIComponent(segmentId)}/frames`,
-        ),
+          `/versions/${encodeURIComponent(datasetVersion)}` +
+          `/intervals/${encodeURIComponent(segmentId)}/frames`;
+        if (videoId) path += `?video_id=${encodeURIComponent(videoId)}`;
+        return apiGet(path);
+      },
       ensureIntervalFrames: (cardId) =>
         logic.executeEnsureIntervalFrames(intervalBrowseDeps(), cardId),
       loadIntervalFrame: (segmentId, frameIndex, options) =>
@@ -1995,7 +2116,7 @@
 
   /**
    * @param {string} segmentId
-   * @param {{ title?: string, imageCount?: number, targetImageId?: string | null }} [meta]
+   * @param {{ title?: string, imageCount?: number, targetImageId?: string | null, videoId?: string | null }} [meta]
    */
   async function addOrFocusInterval(segmentId, meta) {
     return intervalLogic().executeAddOrFocusInterval(intervalBrowseDeps(), segmentId, meta);
@@ -2089,7 +2210,12 @@
     wrap.appendChild(img);
 
     if (identity) {
-      img.src = imageContentUrl(identity.datasetId, identity.datasetVersion, image.image_id);
+      img.src = imageContentUrl(
+        identity.datasetId,
+        identity.datasetVersion,
+        image.image_id,
+        videoIdForImage(image.image_id),
+      );
       if (img.complete && img.naturalWidth > 0) {
         markLoaded();
       } else if (img.complete && img.naturalWidth === 0 && img.getAttribute("src")) {
@@ -2509,28 +2635,48 @@
     dom.pickerSearch.value = "";
     if (dom.pickerTitle) {
       clearChildren(dom.pickerTitle);
-      dom.pickerTitle.appendChild(
-        document.createTextNode(isIntervalBrowse() ? "Add intervals" : "Add frames"),
-      );
+      let title = "Add frames";
+      if (isIntervalBrowse()) {
+        title = state.datasetLayout === "video_catalog" ? "Open video" : "Add intervals";
+      }
+      dom.pickerTitle.appendChild(document.createTextNode(title));
     }
     if (dom.pickerSearchLabel) {
       clearChildren(dom.pickerSearchLabel);
-      dom.pickerSearchLabel.appendChild(
+      let label = "Search by image ID";
+      if (isIntervalBrowse()) {
+        label =
+          state.datasetLayout === "video_catalog"
+            ? "Filter videos or search image ID / display ID"
+            : "Search video name, video ID, image ID, or display ID";
+      }
+      dom.pickerSearchLabel.appendChild(document.createTextNode(label));
+    }
+    if (dom.pickerAddAllBtn) {
+      dom.pickerAddAllBtn.hidden = !isIntervalBrowse() || state.datasetLayout === "video_catalog";
+      dom.pickerAddAllBtn.disabled = true;
+    }
+    if (dom.pickerAddBtn) {
+      clearChildren(dom.pickerAddBtn);
+      dom.pickerAddBtn.appendChild(
         document.createTextNode(
-          isIntervalBrowse()
-            ? "Search video name, video ID, image ID, or display ID"
-            : "Search by image ID",
+          state.datasetLayout === "video_catalog" && isIntervalBrowse()
+            ? "Open selected video"
+            : "Add selected",
         ),
       );
     }
-    if (dom.pickerAddAllBtn) {
-      dom.pickerAddAllBtn.hidden = !isIntervalBrowse();
-      dom.pickerAddAllBtn.disabled = true;
+    if (dom.pickerSearchBtn) {
+      dom.pickerSearchBtn.hidden = !(
+        isIntervalBrowse() && state.datasetLayout === "video_catalog"
+      );
     }
+    state.pickerExplicitImageSearch = false;
+    state.videoCatalogList = null;
     openModal(dom.pickerModal, dom.addFramesBtn);
     dom.pickerSearch.focus();
     if (isIntervalBrowse()) {
-      void loadIntervalPickerPage();
+      void loadIntervalPickerPage({ trigger: "type" });
     } else {
       renderPicker();
     }
@@ -2542,8 +2688,21 @@
     if (pickerSearchTimer) window.clearTimeout(pickerSearchTimer);
     pickerSearchTimer = window.setTimeout(() => {
       state.pickerOffset = 0;
-      void loadIntervalPickerPage();
+      // Typing never triggers cross-video image search in video_catalog mode.
+      state.pickerExplicitImageSearch = false;
+      void loadIntervalPickerPage({ trigger: "type" });
     }, 200);
+  }
+
+  function runExplicitImageSearch() {
+    const started = videoCatalogLogic().beginExplicitImageSearch(
+      pickerSearchTimer,
+      (handle) => window.clearTimeout(handle),
+    );
+    pickerSearchTimer = started.timerHandle;
+    state.pickerOffset = 0;
+    state.pickerExplicitImageSearch = true;
+    void loadIntervalPickerPage({ trigger: started.trigger });
   }
 
   function pickerDeps() {
@@ -2565,9 +2724,13 @@
     );
   }
 
-  async function loadIntervalPickerPage() {
+  /**
+   * @param {{ trigger?: "type"|"explicit" }} [options]
+   */
+  async function loadIntervalPickerPage(options) {
     const identity = currentDatasetIdentity();
     if (!identity || !isIntervalBrowse()) return;
+    const trigger = (options && options.trigger) || "type";
     const q = state.pickerSearch.trim();
     const offset = state.pickerOffset;
     state.pickerRequestId += 1;
@@ -2591,7 +2754,28 @@
     try {
       /** @type {any} */
       let payload;
-      if (q) {
+      const mode = videoCatalogLogic().pickerSearchMode(state.datasetLayout, trigger);
+      if (state.datasetLayout === "video_catalog" && mode === "csv_filter") {
+        // Typing / empty browse: CSV list only (client filter; no video JSON scan).
+        if (!state.videoCatalogList) {
+          const listed = await apiGet(
+            `/api/datasets/${encodeURIComponent(identity.datasetId)}` +
+              `/versions/${encodeURIComponent(identity.datasetVersion)}/videos`,
+          );
+          if (!intervalLogic().pickerRequestStillValid(token, pickerDeps())) return;
+          state.videoCatalogList = Array.isArray(listed.videos) ? listed.videos : [];
+        }
+        const filtered = videoCatalogLogic().filterVideosFromCsv(state.videoCatalogList, q);
+        const page = filtered.slice(offset, offset + PICKER_PAGE_SIZE);
+        payload = {
+          query: q,
+          match_kind: "video_list",
+          hits: page.map((video) => ({ video })),
+          total: filtered.length,
+          offset,
+          limit: PICKER_PAGE_SIZE,
+        };
+      } else if (q || state.pickerExplicitImageSearch) {
         payload = await apiGet(
           `/api/datasets/${encodeURIComponent(identity.datasetId)}` +
             `/versions/${encodeURIComponent(identity.datasetVersion)}/intervals/search` +
@@ -2725,7 +2909,15 @@
     if (!identity || !dom.pickerGrid) return;
 
     if (state.pickerLoading && !state.pickerResults) {
-      dom.pickerGrid.appendChild(el("p", { className: "muted", text: "Loading intervals…" }));
+      dom.pickerGrid.appendChild(
+        el("p", {
+          className: "muted",
+          text:
+            state.datasetLayout === "video_catalog"
+              ? "Loading videos…"
+              : "Loading intervals…",
+        }),
+      );
     }
     if (state.pickerError) {
       dom.pickerGrid.appendChild(el("p", { className: "save-error", text: state.pickerError }));
@@ -2733,6 +2925,10 @@
 
     const results = state.pickerResults;
     const hits = results && Array.isArray(results.hits) ? results.hits : [];
+    if (results && results.match_kind === "video_list") {
+      renderVideoCatalogPicker(identity, results, hits);
+      return;
+    }
     if (dom.pickerMatchInfo && results) {
       let info = "";
       if (results.match_kind === "video") {
@@ -2776,6 +2972,7 @@
         identity.datasetId,
         identity.datasetVersion,
         interval.first_image_id,
+        interval.video_id || null,
       );
       thumb.addEventListener("error", () => {
         thumb.remove();
@@ -2808,6 +3005,7 @@
               hit.target_image_id ||
               state.pickerTargetImages.get(interval.segment_id) ||
               null,
+            videoId: interval.video_id || null,
           });
           return;
         }
@@ -2860,8 +3058,138 @@
         results.match_kind === "video" &&
         Array.isArray(results.hits) &&
         results.hits.length > 0;
-      dom.pickerAddAllBtn.hidden = false;
-      dom.pickerAddAllBtn.disabled = !canAddAll;
+      dom.pickerAddAllBtn.hidden = state.datasetLayout === "video_catalog";
+      dom.pickerAddAllBtn.disabled = !canAddAll || state.datasetLayout === "video_catalog";
+    }
+  }
+
+  /**
+   * Video-catalog picker: CSV rows first; lazy preview per visible tile.
+   * @param {{datasetId: string, datasetVersion: string}} identity
+   * @param {any} results
+   * @param {any[]} hits
+   */
+  function renderVideoCatalogPicker(identity, results, hits) {
+    if (dom.pickerMatchInfo) {
+      clearChildren(dom.pickerMatchInfo);
+      const q = state.pickerSearch.trim();
+      const info = q
+        ? `Filtering videos from videos.csv · ${results.total != null ? results.total : 0} match(es). Use “Search image ID” or Enter for image/display ID lookup.`
+        : `Active videos from videos.csv · ${results.total != null ? results.total : 0} total`;
+      dom.pickerMatchInfo.appendChild(document.createTextNode(info));
+      dom.pickerMatchInfo.hidden = false;
+    }
+    if (!state.pickerLoading && hits.length === 0 && !state.pickerError) {
+      dom.pickerGrid.appendChild(el("p", { className: "muted", text: "No active videos." }));
+    }
+    for (const hit of hits) {
+      const video = hit.video;
+      if (!video) continue;
+      const selected = state.pickerSelected.has(video.video_id);
+      const label = videoCatalogLogic().videoLabelFromFilename(video.video_name);
+      const btn = el("button", {
+        type: "button",
+        className: `picker-item${selected ? " selected" : ""}`,
+        "aria-pressed": selected ? "true" : "false",
+      });
+      const thumbWrap = el("div", { className: "picker-thumb-wrap" });
+      const thumb = el("img", {
+        className: "picker-thumb",
+        alt: "",
+        loading: "lazy",
+        decoding: "async",
+      });
+      thumbWrap.appendChild(thumb);
+      btn.appendChild(thumbWrap);
+      btn.appendChild(el("div", { className: "picker-title-line", text: label }));
+      btn.appendChild(
+        el("div", {
+          className: "picker-note",
+          text: video.video_name,
+        }),
+      );
+      btn.appendChild(
+        el("div", {
+          className: "picker-note",
+          text: video.video_id,
+        }),
+      );
+      // Lazy preview: load only this video's JSON for the first ordered image.
+      void (async () => {
+        const session = state.pickerSession;
+        const requestId = state.pickerRequestId;
+        try {
+          const preview = await apiGet(
+            `/api/datasets/${encodeURIComponent(identity.datasetId)}` +
+              `/versions/${encodeURIComponent(identity.datasetVersion)}` +
+              `/videos/${encodeURIComponent(video.video_id)}/preview`,
+          );
+          if (
+            session !== state.pickerSession ||
+            requestId !== state.pickerRequestId ||
+            !preview.first_image_id
+          ) {
+            return;
+          }
+          thumb.src = imageContentUrl(
+            identity.datasetId,
+            identity.datasetVersion,
+            preview.first_image_id,
+            video.video_id,
+          );
+        } catch (_err) {
+          if (session !== state.pickerSession || requestId !== state.pickerRequestId) return;
+          thumb.remove();
+          thumbWrap.appendChild(el("span", { className: "muted", text: "Preview unavailable" }));
+        }
+      })();
+      thumb.addEventListener("error", () => {
+        thumb.remove();
+        if (!thumbWrap.querySelector(".muted")) {
+          thumbWrap.appendChild(el("span", { className: "muted", text: "Preview unavailable" }));
+        }
+      });
+      btn.addEventListener("click", () => {
+        // Single-select: opening one video at a time keeps interval load bounded.
+        state.pickerSelected = new Set([video.video_id]);
+        renderPicker();
+      });
+      dom.pickerGrid.appendChild(btn);
+    }
+    if (results && dom.pickerPager && dom.pickerPageLabel) {
+      const total = results.total || 0;
+      const limit = results.limit || PICKER_PAGE_SIZE;
+      const offset = results.offset || 0;
+      const page = Math.floor(offset / limit) + 1;
+      const pages = Math.max(1, Math.ceil(total / limit));
+      dom.pickerPager.hidden = total <= limit && offset === 0;
+      clearChildren(dom.pickerPageLabel);
+      dom.pickerPageLabel.appendChild(
+        document.createTextNode(`Page ${page} / ${pages} · ${total} video(s)`),
+      );
+      if (dom.pickerPrevPage) {
+        dom.pickerPrevPage.disabled = offset <= 0 || state.pickerLoading;
+      }
+      if (dom.pickerNextPage) {
+        dom.pickerNextPage.disabled = offset + limit >= total || state.pickerLoading;
+      }
+    }
+    const actionable = pickerResultsAreActionable();
+    const count = state.pickerSelected.size;
+    clearChildren(dom.pickerSelectionCount);
+    dom.pickerSelectionCount.appendChild(
+      document.createTextNode(
+        state.pickerLoading
+          ? "Loading…"
+          : count === 0
+            ? "No video selected"
+            : "1 video selected",
+      ),
+    );
+    dom.pickerAddBtn.disabled = !actionable || count === 0;
+    if (dom.pickerAddAllBtn) {
+      dom.pickerAddAllBtn.hidden = true;
+      dom.pickerAddAllBtn.disabled = true;
     }
   }
 
@@ -2881,6 +3209,10 @@
     const identity = currentDatasetIdentity();
     if (!identity) return;
     const results = state.pickerResults;
+    if (results && results.match_kind === "video_list") {
+      await openSelectedVideoFromPicker();
+      return;
+    }
     const hits = results && Array.isArray(results.hits) ? results.hits : [];
     const selected = Array.from(state.pickerSelected);
     const targetMap = new Map(state.pickerTargetImages);
@@ -2902,6 +3234,7 @@
           title: interval ? interval.title : segmentId,
           imageCount: interval ? interval.image_count : 0,
           targetImageId: (hit && hit.target_image_id) || targetMap.get(segmentId) || null,
+          videoId: interval ? interval.video_id : null,
         });
         if (outcome && outcome.outcome === "error") {
           showBanner(
@@ -2915,6 +3248,71 @@
     } catch (err) {
       if (!intervalLogic().batchAddStillValid(token, batchAddDeps())) return;
       showBanner(errorMessage(err) || "Failed to add selected intervals.", "error");
+    }
+  }
+
+  async function openSelectedVideoFromPicker() {
+    const identity = currentDatasetIdentity();
+    if (!identity) return;
+    const selected = Array.from(state.pickerSelected);
+    if (selected.length !== 1) {
+      showBanner("Select one video to open its intervals.", "warning");
+      return;
+    }
+    const videoId = selected[0];
+    state.activeBatchId += 1;
+    const batchId = state.activeBatchId;
+    const token = {
+      datasetId: identity.datasetId,
+      datasetVersion: identity.datasetVersion,
+      selectionGen: state.selectionGen,
+      batchId,
+    };
+    closeModal(dom.pickerModal);
+    state.selectedVideoId = videoId;
+    try {
+      let offset = 0;
+      const limit = PICKER_PAGE_SIZE;
+      /** @type {any[]} */
+      const intervals = [];
+      let total = Infinity;
+      while (offset < total) {
+        if (!intervalLogic().batchAddStillValid(token, batchAddDeps())) return;
+        const page = await apiGet(
+          `/api/datasets/${encodeURIComponent(identity.datasetId)}` +
+            `/versions/${encodeURIComponent(identity.datasetVersion)}/intervals` +
+            `?video_id=${encodeURIComponent(videoId)}&offset=${offset}&limit=${limit}`,
+        );
+        if (!intervalLogic().batchAddStillValid(token, batchAddDeps())) return;
+        total = typeof page.total === "number" ? page.total : 0;
+        const batch = Array.isArray(page.intervals) ? page.intervals : [];
+        intervals.push(...batch);
+        offset += limit;
+        if (batch.length === 0) break;
+      }
+      for (const interval of intervals) {
+        if (!intervalLogic().batchAddStillValid(token, batchAddDeps())) return;
+        const outcome = await addOrFocusInterval(interval.segment_id, {
+          title: interval.title,
+          imageCount: interval.image_count,
+          targetImageId: null,
+          videoId: interval.video_id || videoId,
+        });
+        if (outcome && outcome.outcome === "error") {
+          showBanner(
+            outcome.errorMessage ||
+              errorMessage(outcome.error) ||
+              `Failed to open interval ${interval.segment_id}.`,
+            "error",
+          );
+        }
+      }
+      setSelectionStatus(
+        `Opened video · ${intervals.length} interval(s) from active catalog.`,
+      );
+    } catch (err) {
+      if (!intervalLogic().batchAddStillValid(token, batchAddDeps())) return;
+      showBanner(errorMessage(err) || "Failed to open video intervals.", "error");
     }
   }
 
@@ -2960,6 +3358,7 @@
           title: hit.interval.title,
           imageCount: hit.interval.image_count,
           targetImageId: hit.target_image_id || null,
+          videoId: hit.interval.video_id || null,
         });
         if (outcome && outcome.outcome === "error") {
           showBanner(
@@ -2980,6 +3379,80 @@
   // Summary
   // ---------------------------------------------------------------------------
 
+  /** Interval-level Summary table (video_catalog / provenance browse). */
+  function renderIntervalSummaryTable(summary) {
+    const s = summary;
+    const allRows = Array.isArray(s.intervals) ? s.intervals : [];
+    const q = state.summarySearch.trim();
+    const rows = videoCatalogSummaryLogic().filterSummaryIntervals(allRows, q);
+
+    const header = el("div", { className: "summary-interval-header" });
+    header.appendChild(
+      el("p", {
+        text:
+          `Effective summary · ${s.total_images} image(s) across ${allRows.length} interval(s). ` +
+          `Effective GT — absent (0): ${s.effective_ground_truth.label_0}; ` +
+          `present (1): ${s.effective_ground_truth.label_1}.`,
+      }),
+    );
+    header.appendChild(
+      el("p", {
+        className: "muted",
+        text: "One row per active interval. Ground truth is read-only effective GT; Mixed means frames in the interval disagree. Counts use persisted reviews, not unsaved drafts.",
+      }),
+    );
+    dom.summaryTableWrap.appendChild(header);
+
+    if (dom.summaryRowCount) {
+      clearChildren(dom.summaryRowCount);
+      dom.summaryRowCount.appendChild(
+        document.createTextNode(`Showing ${rows.length} of ${allRows.length} interval(s)`),
+      );
+    }
+
+    if (rows.length === 0) {
+      dom.summaryTableWrap.appendChild(
+        el("div", {
+          className: "empty-state",
+          text: allRows.length === 0 ? "No active intervals." : "No rows match the search.",
+        }),
+      );
+      return;
+    }
+
+    const table = el("table", { className: "summary-table" });
+    const thead = el("thead");
+    const headRow = el("tr");
+    for (const heading of ["Video", "Time interval", "Ground truth", "Image count"]) {
+      headRow.appendChild(el("th", { text: heading, scope: "col" }));
+    }
+    thead.appendChild(headRow);
+    table.appendChild(thead);
+
+    const tbody = el("tbody");
+    const fmtGt = videoCatalogSummaryLogic().formatIntervalGroundTruth;
+    for (const row of rows) {
+      const tr = el("tr");
+      tr.appendChild(el("td", { text: row.video_label || "" }));
+      tr.appendChild(el("td", { className: "mono", text: row.time_interval || "" }));
+      const gtTd = el("td");
+      const gtText = fmtGt(row.ground_truth);
+      const gtClass =
+        gtText === "Mixed" ? "mixed" : gtText === "1" ? "present" : "absent";
+      gtTd.appendChild(
+        el("span", {
+          className: `label-pill ${gtClass}`,
+          text: gtText,
+        }),
+      );
+      tr.appendChild(gtTd);
+      tr.appendChild(el("td", { text: String(row.image_count ?? 0) }));
+      tbody.appendChild(tr);
+    }
+    table.appendChild(tbody);
+    dom.summaryTableWrap.appendChild(table);
+  }
+
   function renderSummary() {
     if (!dom.summaryTableWrap) return;
     clearChildren(dom.summaryTableWrap);
@@ -2997,41 +3470,41 @@
     }
 
     if (isIntervalBrowse()) {
-      if (!state.summaryLoaded || !state.summary) {
+      if (state.summaryLoading) {
         dom.summaryTableWrap.appendChild(
           el("div", {
             className: "empty-state",
-            text: "Effective summary is not loaded. Use “Load effective summary” for ground-truth distribution counts. The per-image table is omitted for large interval datasets — open frames from Analytical.",
+            text: "Loading effective summary for active videos…",
           }),
         );
         if (dom.summaryRowCount) clearChildren(dom.summaryRowCount);
         return;
       }
-      const s = state.summary;
-      const box = el("div", { className: "empty-state" });
-      box.appendChild(
-        el("p", {
-          text: `Effective summary loaded for ${s.total_images} image(s). Per-image rows are not listed in interval browse mode.`,
-        }),
-      );
-      box.appendChild(
-        el("p", {
-          text: `Effective GT — absent (0): ${s.effective_ground_truth.label_0}; present (1): ${s.effective_ground_truth.label_1}`,
-        }),
-      );
-      box.appendChild(
-        el("p", {
-          className: "muted",
-          text: "Open intervals from Analytical to inspect individual frames. These counts use persisted reviews, not unsaved drafts.",
-        }),
-      );
-      dom.summaryTableWrap.appendChild(box);
-      if (dom.summaryRowCount) {
-        clearChildren(dom.summaryRowCount);
-        dom.summaryRowCount.appendChild(
-          document.createTextNode(`${s.total_images} images (counts only)`),
-        );
+      if (state.summaryError && (!state.summaryLoaded || !state.summary)) {
+        const errBox = el("div", { className: "empty-state" });
+        errBox.appendChild(el("p", { className: "save-error", text: state.summaryError }));
+        const retry = el("button", {
+          type: "button",
+          className: "btn btn-secondary",
+          text: "Retry load effective summary",
+        });
+        retry.addEventListener("click", () => loadSummaryExplicit({ force: true }));
+        errBox.appendChild(retry);
+        dom.summaryTableWrap.appendChild(errBox);
+        if (dom.summaryRowCount) clearChildren(dom.summaryRowCount);
+        return;
       }
+      if (!state.summaryLoaded || !state.summary) {
+        dom.summaryTableWrap.appendChild(
+          el("div", {
+            className: "empty-state",
+            text: "Effective summary is not loaded. Use “Load effective summary” for active-video interval rows and ground-truth counts. Image bytes are not loaded for this table.",
+          }),
+        );
+        if (dom.summaryRowCount) clearChildren(dom.summaryRowCount);
+        return;
+      }
+      renderIntervalSummaryTable(state.summary);
       return;
     }
 
@@ -3231,11 +3704,33 @@
       return;
     }
 
+    if (isIntervalBrowse() && state.summaryLoading) {
+      dom.executiveContent.appendChild(
+        el("div", {
+          className: "empty-state",
+          text: "Loading executive summary for active videos…",
+        }),
+      );
+      return;
+    }
+    if (isIntervalBrowse() && state.summaryError && (!state.summaryLoaded || !state.summary)) {
+      const errBox = el("div", { className: "empty-state" });
+      errBox.appendChild(el("p", { className: "save-error", text: state.summaryError }));
+      const retry = el("button", {
+        type: "button",
+        className: "btn btn-secondary",
+        text: "Retry load executive summary",
+      });
+      retry.addEventListener("click", () => loadSummaryExplicit({ force: true }));
+      errBox.appendChild(retry);
+      dom.executiveContent.appendChild(errBox);
+      return;
+    }
     if (isIntervalBrowse() && (!state.summaryLoaded || !state.summary)) {
       dom.executiveContent.appendChild(
         el("div", {
           className: "empty-state",
-          text: "Executive summary requires the effective summary scan. Use “Load executive summary” — counts are not guessed from original dataset labels alone.",
+          text: "Executive summary requires the effective summary scan. Use “Load executive summary” — counts cover active CSV videos only and are not guessed from original dataset labels alone.",
         }),
       );
       return;
@@ -3481,7 +3976,12 @@
     dom.viewerImage.removeAttribute("src");
     openModal(dom.viewerModal, trigger || null);
 
-    const url = imageContentUrl(identity.datasetId, identity.datasetVersion, imageId);
+    const url = imageContentUrl(
+      identity.datasetId,
+      identity.datasetVersion,
+      imageId,
+      videoIdForImage(imageId),
+    );
     dom.viewerImage.onload = () => {
       state.viewer.naturalWidth = dom.viewerImage.naturalWidth;
       state.viewer.naturalHeight = dom.viewerImage.naturalHeight;
@@ -3638,6 +4138,17 @@
         renderPicker();
       }
     });
+    dom.pickerSearch.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      if (!(isIntervalBrowse() && state.datasetLayout === "video_catalog")) return;
+      event.preventDefault();
+      runExplicitImageSearch();
+    });
+    if (dom.pickerSearchBtn) {
+      dom.pickerSearchBtn.addEventListener("click", () => {
+        runExplicitImageSearch();
+      });
+    }
     dom.pickerAddBtn.addEventListener("click", () => {
       if (isIntervalBrowse()) {
         void addSelectedIntervalsFromPicker();
@@ -3654,13 +4165,21 @@
     if (dom.pickerPrevPage) {
       dom.pickerPrevPage.addEventListener("click", () => {
         state.pickerOffset = Math.max(0, state.pickerOffset - PICKER_PAGE_SIZE);
-        void loadIntervalPickerPage();
+        const trigger =
+          state.datasetLayout === "video_catalog" && state.pickerExplicitImageSearch
+            ? "explicit"
+            : "type";
+        void loadIntervalPickerPage({ trigger });
       });
     }
     if (dom.pickerNextPage) {
       dom.pickerNextPage.addEventListener("click", () => {
         state.pickerOffset += PICKER_PAGE_SIZE;
-        void loadIntervalPickerPage();
+        const trigger =
+          state.datasetLayout === "video_catalog" && state.pickerExplicitImageSearch
+            ? "explicit"
+            : "type";
+        void loadIntervalPickerPage({ trigger });
       });
     }
 

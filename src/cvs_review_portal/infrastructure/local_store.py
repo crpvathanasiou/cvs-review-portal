@@ -17,6 +17,7 @@ from cvs_review_portal.application.ports import (
     ReviewMutator,
     ReviewWriteCommit,
 )
+from cvs_review_portal.application.video_catalog import parse_videos_csv, videos_csv_storage_key
 from cvs_review_portal.domain.constants import MAX_REVIEW_DOCUMENT_BYTES
 from cvs_review_portal.domain.errors import (
     DataStoreUnavailableError,
@@ -33,6 +34,8 @@ from cvs_review_portal.domain.models import (
     MetricsArtifact,
     PredictionsArtifact,
     RunManifest,
+    VideoArtifact,
+    VideoCatalog,
 )
 from cvs_review_portal.domain.review_document import LoadedReview
 from cvs_review_portal.infrastructure.paths import resolve_relative_key, resolve_under_root
@@ -40,6 +43,8 @@ from cvs_review_portal.infrastructure.review_codec import (
     parse_review_payload,
     serialize_review_record,
 )
+from cvs_review_portal.infrastructure.video_cache import VideoArtifactCache
+from cvs_review_portal.settings import DatasetLayout
 
 logger = logging.getLogger("cvs_review_portal.infrastructure.local_store")
 
@@ -58,11 +63,22 @@ _REVIEW_LOCK_TIMEOUT_SECONDS = 30.0
 class LocalPortalDataStore:
     """Read/write published portal artifacts under a configured local data root."""
 
-    def __init__(self, data_root: Path) -> None:
+    def __init__(
+        self,
+        data_root: Path,
+        *,
+        dataset_layout: DatasetLayout = "legacy",
+    ) -> None:
         self._data_root = data_root
+        self._dataset_layout: DatasetLayout = dataset_layout
         self._runs_output = data_root / "runs-output"
         self._raw_images = data_root / "raw-images"
         self._reviews = data_root / "reviews"
+        self._video_cache = VideoArtifactCache()
+
+    @property
+    def dataset_layout(self) -> DatasetLayout:
+        return self._dataset_layout
 
     def ensure_available(self) -> None:
         """Raise when the data root or catalog cannot be used for reads."""
@@ -85,6 +101,11 @@ class LocalPortalDataStore:
 
     def load_dataset(self, dataset_id: str, dataset_version: str) -> DatasetVersion:
         self.ensure_available()
+        if self._dataset_layout == "video_catalog":
+            raise InvalidArtifactError(
+                "Legacy dataset.json is not used when DATASET_LAYOUT=video_catalog.",
+                safe_context=f"dataset_id={dataset_id} dataset_version={dataset_version}",
+            )
         dataset_id = validate_identifier(dataset_id, field="dataset_id")
         dataset_version = validate_identifier(dataset_version, field="dataset_version")
         path = resolve_under_root(
@@ -106,6 +127,106 @@ class LocalPortalDataStore:
                 safe_context=f"dataset_id={dataset_id} dataset_version={dataset_version}",
             )
         return dataset
+
+    def load_video_catalog(self, dataset_id: str, dataset_version: str) -> VideoCatalog:
+        self.ensure_available()
+        if self._dataset_layout != "video_catalog":
+            raise InvalidArtifactError(
+                "Video catalog is only available when DATASET_LAYOUT=video_catalog.",
+                safe_context=f"dataset_id={dataset_id} dataset_version={dataset_version}",
+            )
+        dataset_id = validate_identifier(dataset_id, field="dataset_id")
+        dataset_version = validate_identifier(dataset_version, field="dataset_version")
+        key = videos_csv_storage_key(dataset_id, dataset_version)
+        path = resolve_relative_key(self._data_root, key)
+        if not path.is_file():
+            raise InvalidArtifactError(
+                "videos.csv is missing for a published dataset version.",
+                safe_context=f"dataset_id={dataset_id} dataset_version={dataset_version}",
+            )
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            logger.exception("invalid_artifact artifact=videos_csv")
+            raise InvalidArtifactError(
+                "videos.csv could not be read.",
+                safe_context=f"dataset_id={dataset_id} dataset_version={dataset_version}",
+            ) from exc
+        return parse_videos_csv(text, dataset_id=dataset_id, dataset_version=dataset_version)
+
+    def load_video(self, dataset_id: str, dataset_version: str, video_id: str) -> VideoArtifact:
+        self.ensure_available()
+        if self._dataset_layout != "video_catalog":
+            raise InvalidArtifactError(
+                "Per-video metadata is only available when DATASET_LAYOUT=video_catalog.",
+                safe_context=f"dataset_id={dataset_id} dataset_version={dataset_version}",
+            )
+        dataset_id = validate_identifier(dataset_id, field="dataset_id")
+        dataset_version = validate_identifier(dataset_version, field="dataset_version")
+        video_id = validate_identifier(video_id, field="video_id")
+        catalog = self.load_video_catalog(dataset_id, dataset_version)
+        entry = catalog.get_entry(video_id)
+        if entry is None:
+            raise ResourceNotFoundError(
+                "Video is not in the active videos.csv catalog.",
+                safe_context=(
+                    f"dataset_id={dataset_id} dataset_version={dataset_version} "
+                    f"video_id={video_id}"
+                ),
+            )
+        path = resolve_relative_key(self._data_root, entry.metadata_path)
+        if not path.is_file():
+            raise InvalidArtifactError(
+                "Active video metadata JSON is missing.",
+                safe_context=(
+                    f"dataset_id={dataset_id} dataset_version={dataset_version} "
+                    f"video_id={video_id}"
+                ),
+            )
+        try:
+            fingerprint = f"{path.stat().st_mtime_ns}:{path.stat().st_size}"
+        except OSError as exc:
+            raise InvalidArtifactError(
+                "Active video metadata JSON is unreadable.",
+                safe_context=(
+                    f"dataset_id={dataset_id} dataset_version={dataset_version} "
+                    f"video_id={video_id}"
+                ),
+            ) from exc
+        cached = self._video_cache.get(
+            dataset_id, dataset_version, video_id, fingerprint=fingerprint
+        )
+        if cached is not None:
+            return cached
+        artifact = self._load_video_json(path)
+        if (
+            artifact.dataset_id != dataset_id
+            or artifact.dataset_version != dataset_version
+            or artifact.video_id != video_id
+        ):
+            raise InvalidArtifactError(
+                "Video artifact identity does not match the catalog entry.",
+                safe_context=(
+                    f"dataset_id={dataset_id} dataset_version={dataset_version} "
+                    f"video_id={video_id}"
+                ),
+            )
+        if artifact.video_name != entry.video_name:
+            raise InvalidArtifactError(
+                "Video artifact video_name does not match videos.csv.",
+                safe_context=(
+                    f"dataset_id={dataset_id} dataset_version={dataset_version} "
+                    f"video_id={video_id}"
+                ),
+            )
+        self._video_cache.put(
+            dataset_id,
+            dataset_version,
+            video_id,
+            fingerprint=fingerprint,
+            artifact=artifact,
+        )
+        return artifact
 
     def load_run(self, run_id: str) -> RunManifest:
         self.ensure_available()
@@ -273,6 +394,24 @@ class LocalPortalDataStore:
             raise InvalidArtifactError(
                 "Invalid dataset artifact.",
                 safe_context="artifact=dataset",
+            ) from exc
+
+    def _load_video_json(self, path: Path) -> VideoArtifact:
+        try:
+            raw_text = path.read_text(encoding="utf-8")
+            payload = json.loads(raw_text)
+            payload = _strip_retired_ground_truth_editable(payload)
+            return VideoArtifact.model_validate(payload)
+        except FileNotFoundError as exc:
+            raise ResourceNotFoundError(
+                "video metadata not found.",
+                safe_context="artifact=video",
+            ) from exc
+        except (OSError, UnicodeError, json.JSONDecodeError, ValidationError) as exc:
+            logger.exception("invalid_artifact artifact=video")
+            raise InvalidArtifactError(
+                "Invalid video metadata artifact.",
+                safe_context="artifact=video",
             ) from exc
 
     def _load_json_model(self, path: Path, model_type: type[T], *, artifact: str) -> T:

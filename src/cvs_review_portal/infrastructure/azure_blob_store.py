@@ -26,6 +26,7 @@ from cvs_review_portal.application.ports import (
     ReviewMutator,
     ReviewWriteCommit,
 )
+from cvs_review_portal.application.video_catalog import parse_videos_csv, videos_csv_storage_key
 from cvs_review_portal.domain.constants import MAX_REVIEW_DOCUMENT_BYTES
 from cvs_review_portal.domain.errors import (
     ConfigurationError,
@@ -43,12 +44,16 @@ from cvs_review_portal.domain.models import (
     MetricsArtifact,
     PredictionsArtifact,
     RunManifest,
+    VideoArtifact,
+    VideoCatalog,
 )
 from cvs_review_portal.domain.review_document import LoadedReview
 from cvs_review_portal.infrastructure.review_codec import (
     parse_review_payload,
     serialize_review_record,
 )
+from cvs_review_portal.infrastructure.video_cache import VideoArtifactCache
+from cvs_review_portal.settings import DatasetLayout
 
 logger = logging.getLogger("cvs_review_portal.infrastructure.azure_blob_store")
 
@@ -70,6 +75,7 @@ class AzureBlobPortalDataStore:
         account_url: str,
         container_name: str,
         credential: object | None = None,
+        dataset_layout: DatasetLayout = "legacy",
     ) -> None:
         if not account_url or not account_url.strip():
             raise ConfigurationError(
@@ -83,9 +89,15 @@ class AzureBlobPortalDataStore:
             )
         self._account_url = account_url.rstrip("/")
         self._container_name = container_name
+        self._dataset_layout: DatasetLayout = dataset_layout
         self._injected_credential = credential
         self._owned_credential: DefaultAzureCredential | None = None
         self._service_client: BlobServiceClient | None = None
+        self._video_cache = VideoArtifactCache()
+
+    @property
+    def dataset_layout(self) -> DatasetLayout:
+        return self._dataset_layout
 
     def close(self) -> None:
         client = self._service_client
@@ -135,6 +147,11 @@ class AzureBlobPortalDataStore:
 
     def load_dataset(self, dataset_id: str, dataset_version: str) -> DatasetVersion:
         self.ensure_available()
+        if self._dataset_layout == "video_catalog":
+            raise InvalidArtifactError(
+                "Legacy dataset.json is not used when DATASET_LAYOUT=video_catalog.",
+                safe_context=f"dataset_id={dataset_id} dataset_version={dataset_version}",
+            )
         dataset_id = validate_identifier(dataset_id, field="dataset_id")
         dataset_version = validate_identifier(dataset_version, field="dataset_version")
         key = f"runs-output/datasets/{dataset_id}/{dataset_version}/dataset.json"
@@ -145,6 +162,126 @@ class AzureBlobPortalDataStore:
                 safe_context=f"dataset_id={dataset_id} dataset_version={dataset_version}",
             )
         return dataset
+
+    def load_video_catalog(self, dataset_id: str, dataset_version: str) -> VideoCatalog:
+        self.ensure_available()
+        if self._dataset_layout != "video_catalog":
+            raise InvalidArtifactError(
+                "Video catalog is only available when DATASET_LAYOUT=video_catalog.",
+                safe_context=f"dataset_id={dataset_id} dataset_version={dataset_version}",
+            )
+        dataset_id = validate_identifier(dataset_id, field="dataset_id")
+        dataset_version = validate_identifier(dataset_version, field="dataset_version")
+        key = videos_csv_storage_key(dataset_id, dataset_version)
+        try:
+            raw = self._download_bytes(key)
+        except ResourceNotFoundError as exc:
+            raise InvalidArtifactError(
+                "videos.csv is missing for a published dataset version.",
+                safe_context=f"dataset_id={dataset_id} dataset_version={dataset_version}",
+            ) from exc
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeError as exc:
+            raise InvalidArtifactError(
+                "videos.csv could not be decoded as UTF-8.",
+                safe_context=f"dataset_id={dataset_id} dataset_version={dataset_version}",
+            ) from exc
+        return parse_videos_csv(text, dataset_id=dataset_id, dataset_version=dataset_version)
+
+    def load_video(self, dataset_id: str, dataset_version: str, video_id: str) -> VideoArtifact:
+        self.ensure_available()
+        if self._dataset_layout != "video_catalog":
+            raise InvalidArtifactError(
+                "Per-video metadata is only available when DATASET_LAYOUT=video_catalog.",
+                safe_context=f"dataset_id={dataset_id} dataset_version={dataset_version}",
+            )
+        dataset_id = validate_identifier(dataset_id, field="dataset_id")
+        dataset_version = validate_identifier(dataset_version, field="dataset_version")
+        video_id = validate_identifier(video_id, field="video_id")
+        catalog = self.load_video_catalog(dataset_id, dataset_version)
+        entry = catalog.get_entry(video_id)
+        if entry is None:
+            raise ResourceNotFoundError(
+                "Video is not in the active videos.csv catalog.",
+                safe_context=(
+                    f"dataset_id={dataset_id} dataset_version={dataset_version} "
+                    f"video_id={video_id}"
+                ),
+            )
+        blob = self._blob(entry.metadata_path)
+        # Check metadata freshness (ETag/size) before downloading the JSON body.
+        try:
+            props = blob.get_blob_properties()
+            etag = cast(str | None, getattr(props, "etag", None)) or ""
+            size = getattr(props, "size", None)
+            fingerprint = f"{etag}:{size}"
+        except AzureResourceNotFoundError as exc:
+            raise InvalidArtifactError(
+                "Active video metadata JSON is missing.",
+                safe_context=(
+                    f"dataset_id={dataset_id} dataset_version={dataset_version} "
+                    f"video_id={video_id}"
+                ),
+            ) from exc
+        except (ClientAuthenticationError, AzureError) as exc:
+            logger.exception("azure_video_properties_failed")
+            raise DataStoreUnavailableError(
+                "Azure Blob Storage is unavailable or credentials are invalid.",
+                safe_context="storage=azure_blob",
+            ) from exc
+
+        cached = self._video_cache.get(
+            dataset_id, dataset_version, video_id, fingerprint=fingerprint
+        )
+        if cached is not None:
+            return cached
+
+        try:
+            raw = bytes(blob.download_blob().readall())
+        except AzureResourceNotFoundError as exc:
+            raise InvalidArtifactError(
+                "Active video metadata JSON is missing.",
+                safe_context=(
+                    f"dataset_id={dataset_id} dataset_version={dataset_version} "
+                    f"video_id={video_id}"
+                ),
+            ) from exc
+        except (ClientAuthenticationError, AzureError) as exc:
+            logger.exception("azure_video_read_failed")
+            raise DataStoreUnavailableError(
+                "Azure Blob Storage is unavailable or credentials are invalid.",
+                safe_context="storage=azure_blob",
+            ) from exc
+        artifact = self._parse_video_payload(raw)
+        if (
+            artifact.dataset_id != dataset_id
+            or artifact.dataset_version != dataset_version
+            or artifact.video_id != video_id
+        ):
+            raise InvalidArtifactError(
+                "Video artifact identity does not match the catalog entry.",
+                safe_context=(
+                    f"dataset_id={dataset_id} dataset_version={dataset_version} "
+                    f"video_id={video_id}"
+                ),
+            )
+        if artifact.video_name != entry.video_name:
+            raise InvalidArtifactError(
+                "Video artifact video_name does not match videos.csv.",
+                safe_context=(
+                    f"dataset_id={dataset_id} dataset_version={dataset_version} "
+                    f"video_id={video_id}"
+                ),
+            )
+        self._video_cache.put(
+            dataset_id,
+            dataset_version,
+            video_id,
+            fingerprint=fingerprint,
+            artifact=artifact,
+        )
+        return artifact
 
     def load_run(self, run_id: str) -> RunManifest:
         self.ensure_available()
@@ -368,6 +505,18 @@ class AzureBlobPortalDataStore:
             raise InvalidArtifactError(
                 "Invalid dataset artifact.",
                 safe_context="artifact=dataset",
+            ) from exc
+
+    def _parse_video_payload(self, raw: bytes) -> VideoArtifact:
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+            payload = _strip_retired_ground_truth_editable(payload)
+            return VideoArtifact.model_validate(payload)
+        except (UnicodeError, json.JSONDecodeError, ValidationError) as exc:
+            logger.exception("invalid_artifact artifact=video")
+            raise InvalidArtifactError(
+                "Invalid video metadata artifact.",
+                safe_context="artifact=video",
             ) from exc
 
     def _parse_review(

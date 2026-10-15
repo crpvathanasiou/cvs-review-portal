@@ -21,7 +21,7 @@ The **CVS Review Portal** displays exported datasets and any published Engine re
 Three views:
 
 1. **Analytical** — raw image, read-only ground truth, optional predictions and model description, review comments.
-2. **Summary** — dataset-level information for the selected dataset/version. Provenance-backed datasets load effective counts only when the user asks, and they omit the per-image table.
+2. **Summary** — dataset-level information for the selected dataset/version. Provenance-backed / `video_catalog` datasets load an **interval-level** table (and aggregate effective counts) only when the user asks; they do not list every image.
 3. **Executive Summary** — image count, effective ground-truth distribution, and available evaluation metrics from the same explicit summary load when the dataset is provenance-backed.
 
 Deployment and data publication are independent. Publishing a dataset or run does not require an application code change.
@@ -37,13 +37,14 @@ Only original raw images are displayed. Preprocessing configuration is metadata.
 - Browser caching of successful raw image-content responses
 - Offline Cholec80 import into a new empty data root
 - Interval cards, video/image search, Previous/Next, and paginated thumbnails for datasets that carry provenance
+- **Video catalog** layout (`DATASET_LAYOUT=video_catalog`), deployed on Azure and owner-accepted as the Azure MVP (not exhaustive testing or external production certification): `videos.csv` is the sole active-video list; one JSON metadata file per video; retained `dataset.json` is not the runtime source. Deployment record: [handoff](06_common_handoff.md#azure-checkpoint)
 - Per-image picker for datasets that do not carry provenance
 - Synthetic demo generator
 
 ### Deferred
 
-- Azure account, subscription, storage resources, upload, access configuration, deployment, and live verification
-- Further performance work. Search and frame-navigation latency are an open limitation. The owner accepted the MVP with that limitation and chose to proceed toward Azure. See the [handoff](06_common_handoff.md).
+- Further performance work. The owner accepted an initial Azure Summary of about 3 minutes for this MVP. That time is a known limitation, not a measured cache result, and it is not a deploy blocker. The historical worker-exit root cause is not claimed resolved. See the [handoff](06_common_handoff.md#azure-checkpoint).
+- **CVS Local Review** (planned, not implemented): a Windows, offline, single-user distribution of this same portal and local data, with a launcher, bundled runtime/dependencies, and local comment persistence. No training or inference. Video playback is outside the initial image-review scope.
 - Ground-truth editing
 - Audit history UI and history API
 - A thumbnail pipeline. Thumbnails request the full image-content bytes
@@ -77,9 +78,10 @@ Blocking storage calls use synchronous endpoints. That is the supported style fo
 | **2** | Analytical / summary / executive UI, in-memory comment drafts | Implemented |
 | **3** | Comments-only Save, identity, concurrency, Azure Blob adapter. No audit history | Implemented |
 | **2A** | Offline Cholec80 import | Implemented and imported |
-| **2B** | Interval browse, search, Previous/Next, metadata-first reads | Implemented and owner-accepted for this MVP |
+| **2B** | Interval browse, search, Previous/Next, metadata-first reads | Implemented; prior MVP owner-accepted |
+| **Video catalog** | CSV active list, per-video JSON, targeted reads, interval Summary | Deployed on Azure; owner-accepted MVP. Record in the [handoff](06_common_handoff.md#azure-checkpoint) |
 
-The next action is guided Azure setup. It is specified in the [handoff](06_common_handoff.md), and it has not been started.
+Azure deployment of this revision is complete. Performance improvements and CVS Local Review are future work, not blockers.
 
 ---
 
@@ -103,7 +105,9 @@ Configurable setting: `DATA_ROOT` (default: `demo-data` relative to the process 
 <data_root>/
   raw-images/<dataset_id>/<dataset_version>/<relative-key>
   runs-output/catalog.json
-  runs-output/datasets/<dataset_id>/<dataset_version>/dataset.json
+  runs-output/datasets/<dataset_id>/<dataset_version>/dataset.json   # legacy layout
+  runs-output/datasets/<dataset_id>/<dataset_version>/videos.csv     # video_catalog layout
+  runs-output/datasets/<dataset_id>/<dataset_version>/videos/<video_id>.json
   runs-output/runs/<run_id>/run.json
   runs-output/runs/<run_id>/predictions.json
   runs-output/runs/<run_id>/metrics.json                 # optional
@@ -111,7 +115,14 @@ Configurable setting: `DATA_ROOT` (default: `demo-data` relative to the process 
   reviews/<dataset_id>/<dataset_version>/<image_id>.json # optional seeded reviews
 ```
 
-Discovery uses `catalog.json` as the **publication boundary**. A dataset may be listed and viewed without any runs.
+Layout selection is explicit via `DATASET_LAYOUT`:
+
+| Value | Runtime behavior |
+| --- | --- |
+| `legacy` (default) | Load monolithic `dataset.json`. Demo fixtures and existing tests use this. |
+| `video_catalog` | Load `videos.csv` + per-video JSON only. Never load `dataset.json`. Never fall back to the full legacy dataset. |
+
+Discovery uses `catalog.json` as the **publication boundary**. A dataset may be listed and viewed without any runs. `catalog.json` must not contain a second list of active videos.
 
 Catalog rules:
 
@@ -147,9 +158,42 @@ Image bytes are served only through an application endpoint keyed by dataset ide
 }
 ```
 
+### 5.1.1 Video catalog — `.../videos.csv` + `.../videos/{video_id}.json`
+
+Used only when `DATASET_LAYOUT=video_catalog`.
+
+`videos.csv` columns (exact header):
+
+```text
+video_id,video_name,metadata_path
+```
+
+Rules:
+
+* Exactly one row per active video. The CSV is the **sole authoritative active list**. Presence of a JSON file under `videos/` does not activate a video.
+* `metadata_path` is a safe relative storage key from the data root / Blob container root using `/`. Absolute paths and external URLs are rejected. For this portal the expected key is `runs-output/datasets/{dataset_id}/{dataset_version}/videos/{video_id}.json`.
+* Header-only CSV → zero active videos.
+* Malformed CSV, duplicate `video_id`, unsafe paths, identity mismatches, or missing JSON for an active row → controlled artifact errors. Never silently fall back to `dataset.json`.
+* Changing the active set requires editing only the CSV and refreshing the browser. No application restart, JSON edit, image deletion, rebuild, or redeploy. Image files and saved comment JSON stay in place.
+* `dataset.json` may remain beside the CSV for conversion and for `DATASET_LAYOUT=legacy`. It is not read at runtime in `video_catalog` mode. There is no silent fallback to it.
+
+Each video JSON reuses dataset/image provenance contracts for that video only: `schema_version`, `dataset_id`, `dataset_version`, `display_name`, `description`, `video_id`, `video_name`, and `images[]` (same `DatasetImage` shape, with provenance required and matching `video_id` / `video_name`). Preserve `segment_id`, `image_id`, `display_id`, `raw_image_key`, frame ordering, timestamps, interval bounds, ground truth, and existing metadata.
+
+Loading boundaries:
+
+* Bootstrap / video listing / video-name search read the CSV without loading every video JSON, review, or image.
+* Selecting or searching for a specific video loads that video’s JSON and presents its intervals as cards.
+* Frame navigation, image content, and Save must not reload the entire dataset or construct a combined `DatasetVersion` of all images as a prerequisite for every request.
+* Image-count / interval-count full scans are not computed automatically during bootstrap (`null` in browse/list read models).
+* Explicit effective summary covers **active** videos only. Historical run metrics retain their original meaning.
+* Exact `image_id` / `display_id` search may sequentially scan active video JSON files when the owning video is not already known; this is only for explicit image search, not bootstrap or every keystroke.
+* Relevant requests recheck the small CSV. Any video-metadata cache is bounded and fingerprint-checked (mtime/size or ETag).
+
+Offline converter: `scripts/convert_dataset_to_video_catalog.py` (see [README](../../README.md#video-catalog-layout-csv--per-video-json)).
+
 ### 5.2 Dataset version — `.../dataset.json`
 
-Identity: `(dataset_id, dataset_version)`.
+Identity: `(dataset_id, dataset_version)`. Used when `DATASET_LAYOUT=legacy`.
 
 ```json
 {
@@ -444,7 +488,9 @@ Ground-truth mutation remains out of scope for this portal. There is no review H
 | `GET` | `/api/runs/{run_id}` | Selected run with joined image/prediction information |
 | `GET` | `/api/datasets/{dataset_id}/versions/{dataset_version}/summary` | Full-dataset summary; optional `run_id` for prediction coverage and historical metrics |
 | `GET` | `/api/datasets/{dataset_id}/versions/{dataset_version}/browse` | Lightweight header + browse mode (`interval` \| `image`); no per-image review reads |
-| `GET` | `/api/datasets/.../intervals` | Paginated interval metadata (counts/titles/first-image id); no reviews |
+| `GET` | `/api/datasets/.../videos` | Active videos from `videos.csv` only (`DATASET_LAYOUT=video_catalog`) |
+| `GET` | `/api/datasets/.../videos/{video_id}/preview` | Lazy first-image preview for a CSV video tile (`video_catalog`) |
+| `GET` | `/api/datasets/.../intervals` | Paginated interval metadata; requires `video_id` when `video_catalog` |
 | `GET` | `/api/datasets/.../intervals/search?q=` | Video/image search → interval hits (optional target frame); no reviews |
 | `GET` | `/api/datasets/.../intervals/{segment_id}/frames` | Ordered frame metadata for one interval; no reviews |
 | `GET` | `/api/datasets/.../images/{image_id}/view` | Effective review state for one frame; optional `run_id` prediction |
@@ -560,7 +606,7 @@ Existing `/api`, `/health`, `/ready`, `/version`, and `/docs` remain available.
 
 ### 7.3 Still deferred
 
-Azure resource provisioning, cloud Easy Auth verification, and deployment. Ground-truth creation/editing remains deferred. Performance work on search and frame changes is deferred by owner decision; the limitation is open. The checkpoint is the [handoff](06_common_handoff.md).
+Ground-truth creation/editing remains deferred. Performance work remains future work and is not a blocker; the accepted Azure Summary latency is recorded in the [handoff](06_common_handoff.md#azure-checkpoint). CVS Local Review is planned and not implemented (§1).
 
 ### 7.4 Interval browse (Step 2B)
 
@@ -574,8 +620,8 @@ For datasets whose images carry `provenance`:
 * Picker searches (case-insensitive video filename/stem; exact `video_id`, `image_id`, or `display_id`). A video match lists all of that video’s intervals chronologically; an image match opens the owning interval at that frame. Duplicate-add focuses; remove only hides the card.
 * Picker pages are bounded (default 24) with one representative thumbnail per interval result (lazy), using the existing image content URL/cache.
 * Previous/Next navigate within the interval only (no wraparound). Only the selected frame’s content and effective review are fetched; no next-frame prefetch.
-* Opening a dataset loads `/browse` and a page of interval metadata. That bootstrap does not read every image review and does not scan the summary. The selected frame then loads `GET .../images/{image_id}/view` for effective ground truth, comments, revision, and the optional run prediction. Frame bytes load from the image-content route.
-* Effective summary and executive figures in interval mode load only when the user chooses “Load effective summary” or “Load executive summary” (`GET .../summary`). After a relevant Save, a summary already on screen is marked stale. The UI does not substitute original ground-truth counts for effective counts.
+* Opening a dataset loads `/browse`. Legacy interval datasets may then page interval metadata. With `DATASET_LAYOUT=video_catalog`, bootstrap lists active videos from `/videos` (CSV only); the user opens one video before its intervals load. That bootstrap does not read every video JSON, image review, or summary. Picker typing filters the CSV list only; cross-video `image_id` / `display_id` lookup is an explicit action (Enter or “Search image ID”). `runExplicitImageSearch()` cancels any pending 200 ms typing timer and resets its handle before the explicit search ([handoff](06_common_handoff.md#picker-timer-status)). Visible video tiles show a readable name (for example “Video 02”) and load a representative thumbnail lazily via `GET .../videos/{video_id}/preview` (that video’s JSON only). The technical `video_id` is secondary. Frame/content/review/Save requests carry the owning `video_id` when known so the server resolves inside that video after re-checking CSV membership (sequential scan only when `video_id` is omitted). Azure video metadata checks blob properties/ETag before downloading the JSON body.
+* Effective summary and executive figures in interval mode (including `video_catalog`) load only when the user chooses “Load effective summary” or “Load executive summary” (`GET .../summary`). The Summary response includes one row per active interval (`segment_id`) with readable video label, formatted time range, effective ground truth (`0` / `1` / `Mixed` when frames disagree), and image count — built in the same summary pass as the aggregate counts (no second scan, no image bytes). Rows cover every video in the active `videos.csv` (or every provenance interval in legacy layout), ordered by video name then start/end/`segment_id`. The UI derives dataset identity from `/browse` metadata when full dataset detail is not loaded. Counts cover active CSV videos only; absence of prediction runs must not block dataset-only summaries. Loading and errors are visible in-panel. After a relevant Save, a summary already on screen is marked stale. The UI does not substitute original ground-truth counts for effective counts. Executive Summary presentation stays count/metrics-focused and does not render the interval table.
 * Datasets without provenance keep the per-image picker and load dataset detail plus summary during selection.
 * Interval async loads capture dataset/version, card instance (`cardId`), load generation, selection generation, and run context. A delayed response after a dataset switch, remove/reopen, or run switch is ignored. Applying a frame never replaces a newer persisted review revision with an older GET. Card updates target the affected nodes so typing in another card’s comment field continues while more intervals load. Those guards live in `web/interval_browse_logic.mjs`.
 
@@ -593,7 +639,8 @@ src/cvs_review_portal/
   api/             # thin HTTP routes, auth/CSRF guards, UI registration
   web/             # index.html, styles.css, app.js, review_save_logic.mjs,
                    # register_save_logic.mjs, interval_browse_logic.mjs,
-                   # register_interval_browse_logic.mjs
+                   # register_interval_browse_logic.mjs,
+                   # video_catalog_picker_logic.mjs, video_catalog_summary_logic.mjs
   importers/       # offline Cholec80 preparation
 ```
 
@@ -620,4 +667,4 @@ The imported Cholec80 dataset is a separate data root. It is not produced by thi
 
 ## 10. Non-goals
 
-Ground-truth editing UI or schema; annotation sub-portal; Engine logic; AWS/OpenSearch/database wiring; treating the current navigation latency as a resolved cache defect; Azure resource provisioning and cloud deployment verification in this checkpoint; Docker redesign; renaming the package or replacing `create_app`.
+Ground-truth editing UI or schema; annotation sub-portal; Engine logic; AWS/OpenSearch/database wiring; treating the accepted Summary latency or earlier navigation latency as a measured cache result; claiming the historical worker-exit root cause is resolved; treating the owner-accepted Azure MVP as exhaustive testing or external production certification; Docker redesign; renaming the package or replacing `create_app`.

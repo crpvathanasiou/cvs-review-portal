@@ -14,20 +14,23 @@ Legacy template files `00_*`, `01_*`, `02_*`, and `04_*` are not this product. T
 
 ```text
 Project: CVS Review Portal
-Stage: Step 2B owner-accepted for the current MVP
-Performance: open limitation; no further performance changes before Azure
+Stage: Azure video-catalog MVP owner-accepted
 Local UI: http://127.0.0.1:18080/
 Imported data root: C:\Users\User\cvs-review-portal\cholec80-data
-Azure provisioning, upload, deployment, live verification: not started
+DATASET_LAYOUT: video_catalog
+Azure image: acrcvsdevvas01-bqe6hec0efcdavf3.azurecr.io/cvs-review-portal:video-catalog-20261015-202611
+Azure revision: ca-cvs-portal-dev--0000006
 ```
+
+The owner accepted this Azure deployment as the video-catalog MVP. That acceptance covers the checks in [§7](#azure-checkpoint). It is not exhaustive testing and it is not an external production certification. The earlier local acceptance remains the local checkpoint; it is not restated as a full walkthrough of every prior step.
 
 ---
 
-## 2. Owner acceptance (Step 2B)
+## 2. Prior Step 2B acceptance
 
-Step 2B is owner-accepted for the current MVP. The owner decided to proceed toward Azure without further performance changes now. Performance remains an open limitation.
+Step 2B (interval browse on the monolithic dataset) was owner-accepted earlier. The owner then chose to proceed toward Azure without further performance work. Search and frame-navigation latency remain an open limitation.
 
-Owner observations recorded for this acceptance:
+Owner observations recorded for that earlier acceptance (not re-stated as verification of the video-catalog MVP):
 
 - Searching `video02` took approximately 45 seconds.
 - Searching again after a browser refresh took approximately 2 minutes.
@@ -36,51 +39,50 @@ Owner observations recorded for this acceptance:
 - Comment Save persisted after page refresh.
 - Typing in an existing card was not interrupted while additional intervals loaded.
 
-This list is the acceptance record. It does not mean every previously proposed walkthrough check was separately verified.
-
-Browser image caching was verified in an earlier step. The navigation latency above does not establish whether image-cache reuse failed. Its cause has not been isolated through profiling.
+Browser image caching was verified in an earlier step. Navigation latency cause was not isolated through profiling. Caching and Save concurrency rules stay in [specification §6.3](08_portal_specification.md#63-image-content-browser-caching) and [§7.2](08_portal_specification.md#72-interaction-model).
 
 ---
 
-## 3. Evidence classes
+## 3. Accepted local architecture
 
-### Automated verification
+Canonical contract: [specification §5.1.1](08_portal_specification.md#511-video-catalog--videoscsv--videosvideo_idjson).
+Startup and converter commands: [README](../../README.md#video-catalog-layout-csv--per-video-json).
 
-Recorded before this documentation checkpoint. Not re-executed while writing these documents.
+`DATASET_LAYOUT=video_catalog`:
 
-- `poetry run ruff check .` — exit 0
-- `poetry run ruff format --check .` — exit 0
-- `poetry run pyright` — exit 0, 0 errors
-- `poetry run pytest` — exit 0, including `tests/test_interval_browse.py`
-- `node --check` on the production web modules — recorded as passing
-- `node --test tests/js/save_async_guards.test.mjs tests/js/interval_nav_save.test.mjs` — 19 passed
-
-The JavaScript tests include delayed-response cases: a response for dataset A is dropped after switching to dataset B with the same segment id, and an older frame GET at revision 1 does not replace a newer Save at revision 2. Those tests are automated coverage. They are not the external review and they are not the owner browser session.
-
-### External code review
-
-External code review closed the reproduced failures in the Step 2B async-guard correction:
-
-- a stale response from a previous dataset could still be applied
-- an older frame read could roll back a newer persisted review revision
-
-Production logic for those guards is `src/cvs_review_portal/web/interval_browse_logic.mjs`, registered by `src/cvs_review_portal/web/register_interval_browse_logic.mjs` and called from `src/cvs_review_portal/web/app.js`.
-
-This closure is those reproduced failures. It is not a claim that external review separately approved every Step 2B behavior.
-
-### Owner browser observations
-
-The observations in §2. They are separate from the automated tests and from the code-review closure.
-
-### Not executed for this checkpoint
-
-- Quality gates, Node checks, and the importer
-- Docker build, `docker compose up`, and any container smoke test
-- Azure account, storage, upload, access configuration, deployment, and live cloud verification
+- `videos.csv` is the sole active-video list, one row per video.
+- Columns: `video_id,video_name,metadata_path`.
+- One JSON metadata file per video.
+- Removing or restoring a CSV row changes visibility after a browser refresh, without restarting the process.
+- Image files and saved comments remain intact.
+- `dataset.json` is retained for compatibility and conversion. It is not the runtime source in this mode.
 
 ---
 
-## 4. Imported dataset checkpoint
+## 4. Data checkpoint
+
+<a id="data-checkpoint"></a>
+
+Local root: `C:\Users\User\cvs-review-portal\cholec80-data`
+
+Recorded conversion (already on disk; not regenerated for this documentation update):
+
+```text
+video JSON files:     75
+active CSV videos:    10
+active intervals:     70
+active images:        10,018
+full source:          494 intervals / 72,273 images
+```
+
+Active videos (name order):
+
+```text
+video02, video04, video05, video07, video08,
+video09, video10, video11, video12, video13
+```
+
+Imported-dataset baseline (unchanged source counts):
 
 ```text
 dataset_id: cholec80
@@ -93,13 +95,10 @@ GT1: 18 intervals / 498 images
 video70.mp4: skipped by extraction (interval_out_of_bounds)
 unused XLSX rows: 78
 repeated source frames with conflicting interval labels: 58
-  (separate image records preserved)
 inference runs published with this import: none
 catalog runs: []
 dataset display_name: cholec80 v1
 ```
-
-Local paths:
 
 ```text
 Export:  C:\Users\User\surgical-exports\data\frames-cholec80-all-1fps-jpeg90-run-001
@@ -108,43 +107,152 @@ Data:    C:\Users\User\cvs-review-portal\cholec80-data
 Portal:  http://127.0.0.1:18080/
 ```
 
-Completed before this checkpoint:
+---
 
-- Comments-only Save
-- Browser image caching (earlier step)
-- Step 2A real import
-- Step 2B interval browsing and corrective review
-- Owner acceptance, with performance left open
+## 5. Verification and acceptance
+
+<a id="verification-and-acceptance"></a>
+
+These classes are separate. Do not treat one as the other.
+
+### Cursor-recorded automated checks
+
+Reported from implementation sessions in the project Poetry environment (Python 3.11). Not re-run for this documentation update.
+
+Before the Summary-table change:
+
+- `poetry run ruff check .` — exit 0
+- `poetry run ruff format --check .` — exit 0
+- `poetry run pyright` — 0 errors
+- `poetry run pytest` — 159 passed
+- `node --test` on the JS suites then in the tree — 30 passed
+
+After the Summary-table change (same session class):
+
+- Ruff check, Ruff format check, and Pyright — exit 0
+- `poetry run pytest` — 161 passed
+- `node --test` was run on the picker and summary JS files in that session (those files passed). That invocation was not recorded as a full 32-test JS suite.
+
+### External review checks
+
+Latest recorded external checks (not Cursor, and not re-run here):
+
+- Before the Summary-table change: 159 Python tests and 30 JS tests passed.
+- After the Summary-table change: 18 targeted Python tests and 32 JS tests passed.
+- External Python checks used Python 3.12, not the project's locked Python 3.11 environment.
+- External interactive browser verification was not performed.
+
+### Owner local observations / acceptance
+
+Before this Azure revision, the owner accepted the local video-catalog MVP as ready to deploy. Executive Summary was reported working locally before the interval Summary table was added; the Summary table was then requested and implemented. That local acceptance is not the Azure acceptance in [§7](#azure-checkpoint), and it is not a checklist of every earlier walkthrough step.
+
+### Azure owner acceptance
+
+Recorded in [§7](#azure-checkpoint). The previous `step2b-v1` deployment is not this acceptance, and neither deployment proves the historical worker-exit root cause.
 
 ---
 
-## 5. Exact next action
+## 6. Picker timer status
 
-Guided Azure setup, in this order:
+<a id="picker-timer-status"></a>
 
-1. Establish account and subscription status.
-2. Create storage.
-3. Upload the prepared data.
-4. Configure application access.
-5. Deploy the Dockerized portal.
-6. Verify it with real images.
+**Fixed.** `runExplicitImageSearch()` calls production `beginExplicitImageSearch()`, which `clearTimeout`s any pending `pickerSearchTimer` and sets the handle to `0` before the explicit `/intervals/search` load. Typing still schedules the 200 ms CSV filter. A keystroke immediately followed by Enter or Search image ID no longer lets that debounce replace the explicit search.
 
-Azure provisioning, live Azure verification, and deployment are not completed. Do not start that work from this documentation checkpoint. Do not treat performance as resolved.
+Verified in this correction: `node --check` on `app.js` and `video_catalog_picker_logic.mjs` exited 0. `node --test` on the four JS suites (`save_async_guards`, `interval_nav_save`, `video_catalog_picker`, `video_catalog_summary`) passed 33/33, including `typing then immediate Enter/Search cancels the pending CSV debounce`. This was not a Python quality-gate run.
 
 ---
 
-## 6. Prerequisites still open
+## 7. Azure checkpoint
 
-Concrete gaps in the current Docker runtime configuration (details and commands in [../../README.md](../../README.md#docker)):
+<a id="azure-checkpoint"></a>
 
-- Container port is 8000. Compose sets `APP_ENV`, `APP_VERSION`, and `LOG_LEVEL` only. No volume is declared, and the image does not contain `cholec80-data` or `demo-data`.
-- Unset identity defaults to `disabled`. `/health` can pass while the UI returns 401.
-- Development identity allows loopback clients only, so it does not authenticate a browser that reaches a published container port.
-- `.gitignore` and `.dockerignore` exclude `/cholec80-data/`. `git check-ignore` matches `cholec80-data/`. No files under that directory are tracked. `.env` remains excluded. `demo-data/` remains in the Docker build context.
+Existing resources (do not recreate; do not delete the previous image or legacy metadata):
 
-Also still open, and unchanged by this checkpoint:
+```text
+Resource group:     rg-cvs-dev
+Storage account:    stcvsdevvas01
+Data container:     portal-data (private)
+Container Registry: acrcvsdevvas01
+Registry server:    acrcvsdevvas01-bqe6hec0efcdavf3.azurecr.io
+Container App:      ca-cvs-portal-dev
+Container name:     simple-hello-world-container
+HTTPS ingress:      target port 8000
+Revision mode:      Single
+Resources:          1 CPU / 2 GiB
+```
 
-- Private Blob container, upload, managed identity / Easy Auth, and cloud verification
-- Thumbnail pipeline (thumbnails use the full image-content endpoint)
-- Immediate browser-cache removal on logout
-- Per-image Summary table rows in interval browse (counts load only after an explicit summary action)
+Public URL:
+
+```text
+https://ca-cvs-portal-dev.thankfulflower-9c425075.northeurope.azurecontainerapps.io/
+```
+
+Deployed image (current revision):
+
+```text
+acrcvsdevvas01-bqe6hec0efcdavf3.azurecr.io/cvs-review-portal:video-catalog-20261015-202611
+Revision: ca-cvs-portal-dev--0000006
+DATASET_LAYOUT=video_catalog
+```
+
+Previous image, retained and not the active revision:
+
+```text
+acrcvsdevvas01-bqe6hec0efcdavf3.azurecr.io/cvs-review-portal:step2b-v1
+```
+
+Already on Azure before this revision, and still in place:
+
+- All 72,273 images. This deployment reused them; they were not uploaded again.
+- The previous `runs-output` metadata.
+- System-assigned managed identity with registry pull and `portal-data` access.
+- Entra authentication and the owner’s application allowlist.
+- `STORAGE_BACKEND=azure_blob`
+- `AZURE_STORAGE_ACCOUNT_URL=https://stcvsdevvas01.blob.core.windows.net`
+- `AZURE_BLOB_CONTAINER=portal-data`
+- `IDENTITY_MODE=azure_app_service`
+
+Video-catalog metadata uploaded for this deployment:
+
+- 75 video JSON files and `videos.csv`.
+- The CSV selects 10 videos, 70 intervals, and 10,018 images.
+
+### Owner verification on this revision
+
+Owner-accepted Azure MVP. Not exhaustive testing. Not an external production certification.
+
+- Summary loads its interval table.
+- Executive Summary works.
+- Opening a video or interval, and removing it from the view, works.
+- Frame navigation and zoom work.
+- Comment Save works. The owner confirmed the requested persistence check.
+
+Known limitation, explicitly accepted for this MVP: the initial Summary took approximately 3 minutes. Later browsing was faster. A cache contribution is a hypothesis, not a measured finding.
+
+Worker terminations were observed on the previous deployment. Resources are 1 CPU / 2 GiB. The underlying cause was not proven. This revision does not establish that the historical worker-exit root cause is resolved.
+
+---
+
+## 8. Deployment status
+
+Azure deployment of this video-catalog revision is complete. Performance improvements and CVS Local Review remain future work. They are not blockers for this MVP.
+
+---
+
+## 9. Planned follow-up
+
+<a id="planned-follow-up"></a>
+
+**CVS Local Review** is planned, not implemented.
+
+Windows, offline, single-user distribution using the same portal code and local data, a launcher, bundled runtime/dependencies, and local comment persistence. No training or inference. Video playback is outside the initial image-review scope.
+
+---
+
+## 10. Future work (not blockers)
+
+- Performance improvements. The accepted limitation is the initial Summary time of about 3 minutes on this Azure revision. Later browsing was faster. Cache contribution was not measured. Earlier search and frame-navigation latency remains an open product limitation, not a deploy blocker.
+- Historical worker-exit root cause. Observed on the previous deployment. Not claimed resolved by revision `ca-cvs-portal-dev--0000006`.
+- CVS Local Review ([§9](#planned-follow-up)). Planned, not implemented.
+- Docker runtime gaps for a stock local container (port 8000, identity defaults, no data volume) — [README](../../README.md#docker). Separate from the completed Azure deployment.
+- Separate thumbnail files; immediate browser-cache removal on logout.

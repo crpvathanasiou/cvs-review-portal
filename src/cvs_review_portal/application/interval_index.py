@@ -54,6 +54,17 @@ def format_clock(seconds: int) -> str:
     return f"{minutes}:{secs:02d}"
 
 
+def format_summary_clock(seconds: int) -> str:
+    """Format non-negative whole seconds as MM:SS or HH:MM:SS for Summary rows."""
+    if seconds < 0:
+        seconds = 0
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    return f"{minutes:02d}:{secs:02d}"
+
+
 def video_label_from_filename(filename: str) -> str:
     """Derive a short video label such as ``Video 02`` from ``video02.mp4``."""
     stem = filename.rsplit(".", 1)[0] if "." in filename else filename

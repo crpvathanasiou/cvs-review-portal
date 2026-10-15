@@ -43,6 +43,9 @@ __all__ = (
     "ReviewRecord",
     "RunManifest",
     "SchemaVersion",
+    "VideoArtifact",
+    "VideoCatalog",
+    "VideoCatalogEntry",
 )
 
 SchemaVersion = Literal["1"]
@@ -197,6 +200,135 @@ class DatasetVersion(PortalModel):
             if image.image_id == image_id:
                 return image
         return None
+
+
+class VideoCatalogEntry(PortalModel):
+    """One active video row from ``videos.csv`` (sole activation list)."""
+
+    video_id: str
+    video_name: str
+    metadata_path: str
+
+    @field_validator("video_id")
+    @classmethod
+    def _video_id(cls, value: str) -> str:
+        return validate_identifier(value, field="video_id")
+
+    @field_validator("video_name")
+    @classmethod
+    def _video_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned or cleaned != value:
+            raise ValueError("video_name must be a non-empty exact filename")
+        return cleaned
+
+    @field_validator("metadata_path")
+    @classmethod
+    def _metadata_path(cls, value: str) -> str:
+        return validate_relative_storage_key(value, field="metadata_path")
+
+
+class VideoCatalog(PortalModel):
+    """Parsed active-video CSV for one dataset version."""
+
+    dataset_id: str
+    dataset_version: str
+    entries: list[VideoCatalogEntry]
+
+    @field_validator("dataset_id", "dataset_version")
+    @classmethod
+    def _ids(cls, value: str, info: ValidationInfo) -> str:
+        return validate_identifier(value, field=str(info.field_name))
+
+    @model_validator(mode="after")
+    def _unique_video_ids(self) -> VideoCatalog:
+        seen: set[str] = set()
+        for entry in self.entries:
+            if entry.video_id in seen:
+                raise ValueError(f"Duplicate video_id in videos.csv: {entry.video_id}")
+            seen.add(entry.video_id)
+        return self
+
+    def video_ids(self) -> set[str]:
+        return {entry.video_id for entry in self.entries}
+
+    def get_entry(self, video_id: str) -> VideoCatalogEntry | None:
+        for entry in self.entries:
+            if entry.video_id == video_id:
+                return entry
+        return None
+
+
+class VideoArtifact(PortalModel):
+    """Per-video metadata JSON: identity plus all images/intervals for one video."""
+
+    schema_version: SchemaVersion
+    dataset_id: str
+    dataset_version: str
+    display_name: str
+    description: str | None = None
+    video_id: str
+    video_name: str
+    images: list[DatasetImage]
+
+    @field_validator("dataset_id", "dataset_version", "video_id")
+    @classmethod
+    def _ids(cls, value: str, info: ValidationInfo) -> str:
+        return validate_identifier(value, field=str(info.field_name))
+
+    @field_validator("video_name")
+    @classmethod
+    def _video_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned or cleaned != value:
+            raise ValueError("video_name must be a non-empty exact filename")
+        return cleaned
+
+    @model_validator(mode="after")
+    def _unique_and_matching(self) -> VideoArtifact:
+        seen: set[str] = set()
+        seen_display: set[str] = set()
+        for image in self.images:
+            if image.image_id in seen:
+                raise ValueError(f"Duplicate image_id in video artifact: {image.image_id}")
+            seen.add(image.image_id)
+            provenance = image.provenance
+            if provenance is None:
+                raise ValueError(f"Video artifact image {image.image_id} is missing provenance.")
+            if provenance.video_id != self.video_id:
+                raise ValueError(
+                    f"Image {image.image_id} provenance.video_id does not match video_id."
+                )
+            if provenance.video_filename != self.video_name:
+                raise ValueError(
+                    f"Image {image.image_id} provenance.video_filename does not match video_name."
+                )
+            if provenance.display_id in seen_display:
+                raise ValueError(
+                    f"Duplicate provenance.display_id in video artifact: {provenance.display_id}"
+                )
+            seen_display.add(provenance.display_id)
+        return self
+
+    def image_ids(self) -> set[str]:
+        return {image.image_id for image in self.images}
+
+    def get_image(self, image_id: str) -> DatasetImage | None:
+        for image in self.images:
+            if image.image_id == image_id:
+                return image
+        return None
+
+    def as_dataset_version(self) -> DatasetVersion:
+        """Project this video's images as a single-video DatasetVersion for reuse."""
+        return DatasetVersion(
+            schema_version=self.schema_version,
+            dataset_id=self.dataset_id,
+            dataset_version=self.dataset_version,
+            display_name=self.display_name,
+            description=self.description,
+            images=list(self.images),
+        )
 
 
 class ModelInfo(PortalModel):

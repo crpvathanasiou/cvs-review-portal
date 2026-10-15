@@ -24,7 +24,10 @@ class DatasetListItem(ViewModel):
     dataset_version: str
     display_name: str
     description: str | None
-    image_count: int
+    # None when DATASET_LAYOUT=video_catalog (full image scan is not done at list time).
+    image_count: int | None = None
+    video_count: int | None = None
+    dataset_layout: Literal["legacy", "video_catalog"] = "legacy"
 
 
 class DatasetListView(ViewModel):
@@ -123,6 +126,18 @@ class PredictionCoverage(ViewModel):
     predicted_label_1: int = Field(ge=0)
 
 
+class SummaryIntervalRow(ViewModel):
+    """One active interval for the Summary tab table (not a per-image row)."""
+
+    segment_id: str
+    video_id: str
+    video_label: str
+    time_interval: str
+    # Effective GT for the interval: 0, 1, or Mixed when frames disagree.
+    ground_truth: Literal[0, 1, "Mixed"]
+    image_count: int = Field(ge=0)
+
+
 class SummaryView(ViewModel):
     dataset_id: str
     dataset_version: str
@@ -131,6 +146,8 @@ class SummaryView(ViewModel):
     run_id: str | None
     prediction_coverage: PredictionCoverage | None
     historical_metrics: MetricsView
+    # Empty when the dataset has no provenance-backed intervals.
+    intervals: list[SummaryIntervalRow] = Field(default_factory=list[SummaryIntervalRow])
 
 
 # ---------------------------------------------------------------------------
@@ -145,9 +162,35 @@ class DatasetBrowseView(ViewModel):
     dataset_version: str
     display_name: str
     description: str | None
-    image_count: int
+    # None when video_catalog bootstrap skips full image/interval scans.
+    image_count: int | None = None
     browse_mode: Literal["interval", "image"]
-    interval_count: int = 0
+    interval_count: int | None = 0
+    video_count: int | None = None
+    dataset_layout: Literal["legacy", "video_catalog"] = "legacy"
+
+
+class VideoListItem(ViewModel):
+    video_id: str
+    video_name: str
+
+
+class VideoListView(ViewModel):
+    dataset_id: str
+    dataset_version: str
+    videos: list[VideoListItem]
+    total: int
+
+
+class VideoPreviewView(ViewModel):
+    """Lazy per-video picker preview (loads one video JSON)."""
+
+    dataset_id: str
+    dataset_version: str
+    video_id: str
+    video_name: str
+    video_label: str
+    first_image_id: str
 
 
 class IntervalMetaView(ViewModel):

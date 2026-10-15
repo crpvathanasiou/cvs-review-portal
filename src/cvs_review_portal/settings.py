@@ -13,6 +13,7 @@ AppEnvironment = Literal["local", "dev", "staging", "prod"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 StorageBackend = Literal["local", "azure_blob"]
 IdentityMode = Literal["disabled", "development", "azure_app_service"]
+DatasetLayout = Literal["legacy", "video_catalog"]
 
 
 class Settings(BaseSettings):
@@ -40,6 +41,10 @@ class Settings(BaseSettings):
     azure_storage_account_url: str | None = None
     azure_blob_container: str | None = None
 
+    # legacy: load monolithic dataset.json. video_catalog: videos.csv + per-video JSON
+    # (dataset.json is not read at runtime). Default preserves demo fixtures and tests.
+    dataset_layout: DatasetLayout = "legacy"
+
     identity_mode: IdentityMode = "disabled"
     development_actor: str | None = None
     allowed_actors: str = ""
@@ -58,7 +63,7 @@ class Settings(BaseSettings):
             return value.upper()
         return value
 
-    @field_validator("storage_backend", "identity_mode", mode="before")
+    @field_validator("storage_backend", "identity_mode", "dataset_layout", mode="before")
     @classmethod
     def _normalize_lower(cls, value: object) -> object:
         if isinstance(value, str):

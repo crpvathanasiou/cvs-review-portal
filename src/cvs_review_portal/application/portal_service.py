@@ -2,15 +2,27 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from cvs_review_portal.application.interval_index import (
     IntervalRecord,
     build_interval_index,
     dataset_has_provenance,
     find_interval,
+    format_summary_clock,
     interval_title,
     search_intervals,
+    video_label_from_filename,
 )
 from cvs_review_portal.application.ports import PortalDataStore
+from cvs_review_portal.application.video_resolve import (
+    intervals_for_active_video,
+    iter_active_images,
+    require_published_video_catalog,
+    resolve_image,
+    resolve_interval,
+    search_active_videos,
+)
 from cvs_review_portal.application.views import (
     DatasetBrowseView,
     DatasetDetailView,
@@ -34,7 +46,11 @@ from cvs_review_portal.application.views import (
     RunListItem,
     RunListView,
     RunOverviewView,
+    SummaryIntervalRow,
     SummaryView,
+    VideoListItem,
+    VideoListView,
+    VideoPreviewView,
 )
 from cvs_review_portal.domain.errors import InvalidArtifactError, ResourceNotFoundError
 from cvs_review_portal.domain.identifiers import validate_identifier
@@ -47,6 +63,7 @@ from cvs_review_portal.domain.models import (
     Prediction,
     PredictionsArtifact,
     RunManifest,
+    VideoArtifact,
 )
 
 _DEFAULT_PICKER_PAGE = 24
@@ -63,6 +80,22 @@ class PortalReadService:
         catalog = self._load_catalog()
         items: list[DatasetListItem] = []
         for ref in catalog.datasets:
+            if self._store.dataset_layout == "video_catalog":
+                video_catalog = self._load_published_video_catalog(
+                    ref.dataset_id, ref.dataset_version, from_catalog=True
+                )
+                items.append(
+                    DatasetListItem(
+                        dataset_id=ref.dataset_id,
+                        dataset_version=ref.dataset_version,
+                        display_name=f"{ref.dataset_id} {ref.dataset_version}",
+                        description=None,
+                        image_count=None,
+                        video_count=len(video_catalog.entries),
+                        dataset_layout="video_catalog",
+                    )
+                )
+                continue
             dataset = self._load_published_dataset(
                 ref.dataset_id, ref.dataset_version, from_catalog=True
             )
@@ -73,11 +106,15 @@ class PortalReadService:
                     display_name=dataset.display_name,
                     description=dataset.description,
                     image_count=len(dataset.images),
+                    video_count=None,
+                    dataset_layout="legacy",
                 )
             )
         return DatasetListView(datasets=items)
 
     def get_dataset(self, dataset_id: str, dataset_version: str) -> DatasetDetailView:
+        if self._store.dataset_layout == "video_catalog":
+            return self._get_dataset_from_videos(dataset_id, dataset_version)
         dataset = self._require_client_dataset(dataset_id, dataset_version)
         images = [self._effective_image(dataset, image) for image in dataset.images]
         return DatasetDetailView(
@@ -133,9 +170,7 @@ class PortalReadService:
         catalog = self._load_catalog()
         run = self._require_client_run(catalog, run_id)
         self._ensure_run_dataset_published(catalog, run)
-        dataset = self._load_published_dataset(
-            run.dataset_id, run.dataset_version, from_catalog=True
-        )
+        dataset = self._require_dataset_for_joins(run.dataset_id, run.dataset_version)
         predictions = self._store.load_predictions(run)
         self._validate_predictions(dataset, predictions)
         metrics_view = self._load_metrics_view(run, dataset, predictions)
@@ -171,10 +206,12 @@ class PortalReadService:
         run_id: str | None = None,
     ) -> SummaryView:
         catalog = self._load_catalog()
-        dataset = self._require_client_dataset(dataset_id, dataset_version)
+        dataset = self._require_dataset_for_joins(dataset_id, dataset_version)
         effective_images = [self._effective_image(dataset, image) for image in dataset.images]
         gt_0 = sum(1 for image in effective_images if image.effective_ground_truth == 0)
         gt_1 = sum(1 for image in effective_images if image.effective_ground_truth == 1)
+        # Interval rows reuse this same effective-image pass (no second scan).
+        intervals = _summary_interval_rows(dataset, effective_images)
 
         prediction_coverage: PredictionCoverage | None = None
         historical_metrics = MetricsView(available=False)
@@ -205,13 +242,33 @@ class PortalReadService:
             run_id=resolved_run_id,
             prediction_coverage=prediction_coverage,
             historical_metrics=historical_metrics,
+            intervals=intervals,
         )
 
     def get_image_content(
-        self, dataset_id: str, dataset_version: str, image_id: str
+        self,
+        dataset_id: str,
+        dataset_version: str,
+        image_id: str,
+        *,
+        video_id: str | None = None,
     ) -> tuple[bytes, str]:
-        dataset = self._require_client_dataset(dataset_id, dataset_version)
         image_id = validate_identifier(image_id, field="image_id")
+        dataset_id, dataset_version = self._require_published_ids(dataset_id, dataset_version)
+        if video_id is not None:
+            video_id = validate_identifier(video_id, field="video_id")
+        if self._store.dataset_layout == "video_catalog":
+            resolved = resolve_image(
+                self._store,
+                dataset_id,
+                dataset_version,
+                image_id,
+                video_id=video_id,
+            )
+            return self._store.read_raw_image_bytes(
+                dataset_id, dataset_version, resolved.image.raw_image_key
+            )
+        dataset = self._require_client_dataset(dataset_id, dataset_version)
         image = dataset.get_image(image_id)
         if image is None:
             raise ResourceNotFoundError(
@@ -227,6 +284,23 @@ class PortalReadService:
 
     def get_browse(self, dataset_id: str, dataset_version: str) -> DatasetBrowseView:
         """Dataset header + browse mode without loading per-image reviews."""
+        dataset_id, dataset_version = self._require_published_ids(dataset_id, dataset_version)
+        if self._store.dataset_layout == "video_catalog":
+            video_catalog = self._load_published_video_catalog(
+                dataset_id, dataset_version, from_catalog=True
+            )
+            # Bootstrap reads CSV only — no video JSON, no image/interval counts.
+            return DatasetBrowseView(
+                dataset_id=dataset_id,
+                dataset_version=dataset_version,
+                display_name=f"{dataset_id} {dataset_version}",
+                description=None,
+                image_count=None,
+                browse_mode="interval",
+                interval_count=None,
+                video_count=len(video_catalog.entries),
+                dataset_layout="video_catalog",
+            )
         dataset = self._require_client_dataset(dataset_id, dataset_version)
         has_intervals = dataset_has_provenance(dataset)
         interval_count = len(build_interval_index(dataset)) if has_intervals else 0
@@ -238,6 +312,65 @@ class PortalReadService:
             image_count=len(dataset.images),
             browse_mode="interval" if has_intervals else "image",
             interval_count=interval_count,
+            video_count=None,
+            dataset_layout="legacy",
+        )
+
+    def list_videos(self, dataset_id: str, dataset_version: str) -> VideoListView:
+        """List active videos from CSV only (no video JSON)."""
+        dataset_id, dataset_version = self._require_published_ids(dataset_id, dataset_version)
+        if self._store.dataset_layout != "video_catalog":
+            raise ResourceNotFoundError(
+                "Video listing requires DATASET_LAYOUT=video_catalog.",
+                safe_context=f"dataset_id={dataset_id} dataset_version={dataset_version}",
+            )
+        video_catalog = self._load_published_video_catalog(
+            dataset_id, dataset_version, from_catalog=True
+        )
+        return VideoListView(
+            dataset_id=dataset_id,
+            dataset_version=dataset_version,
+            videos=[
+                VideoListItem(video_id=entry.video_id, video_name=entry.video_name)
+                for entry in video_catalog.entries
+            ],
+            total=len(video_catalog.entries),
+        )
+
+    def get_video_preview(
+        self, dataset_id: str, dataset_version: str, video_id: str
+    ) -> VideoPreviewView:
+        """Lazy preview for one active video: readable label + first ordered image id.
+
+        Loads only that video's JSON (CSV membership rechecked). Used for picker
+        thumbnails; not part of CSV-only listing bootstrap.
+        """
+        dataset_id, dataset_version = self._require_published_ids(dataset_id, dataset_version)
+        if self._store.dataset_layout != "video_catalog":
+            raise ResourceNotFoundError(
+                "Video preview requires DATASET_LAYOUT=video_catalog.",
+                safe_context=f"dataset_id={dataset_id} dataset_version={dataset_version}",
+            )
+        video_id = validate_identifier(video_id, field="video_id")
+        video, records = intervals_for_active_video(
+            self._store, dataset_id, dataset_version, video_id
+        )
+        if not records:
+            raise ResourceNotFoundError(
+                "Active video has no intervals.",
+                safe_context=(
+                    f"dataset_id={dataset_id} dataset_version={dataset_version} "
+                    f"video_id={video_id}"
+                ),
+            )
+        first = records[0]
+        return VideoPreviewView(
+            dataset_id=dataset_id,
+            dataset_version=dataset_version,
+            video_id=video.video_id,
+            video_name=video.video_name,
+            video_label=video_label_from_filename(video.video_name),
+            first_image_id=first.first_image_id,
         )
 
     def list_intervals(
@@ -247,10 +380,34 @@ class PortalReadService:
         *,
         offset: int = 0,
         limit: int = _DEFAULT_PICKER_PAGE,
+        video_id: str | None = None,
     ) -> IntervalListView:
-        dataset = self._require_client_dataset(dataset_id, dataset_version)
+        dataset_id, dataset_version = self._require_published_ids(dataset_id, dataset_version)
         offset, limit = _clamp_page(offset, limit)
+        if self._store.dataset_layout == "video_catalog":
+            if video_id is None:
+                raise ResourceNotFoundError(
+                    "video_id is required to list intervals when DATASET_LAYOUT=video_catalog.",
+                    safe_context=f"dataset_id={dataset_id} dataset_version={dataset_version}",
+                )
+            video_id = validate_identifier(video_id, field="video_id")
+            video, records = intervals_for_active_video(
+                self._store, dataset_id, dataset_version, video_id
+            )
+            page = records[offset : offset + limit]
+            return IntervalListView(
+                dataset_id=dataset_id,
+                dataset_version=dataset_version,
+                intervals=[self._interval_meta_video(video, record) for record in page],
+                total=len(records),
+                offset=offset,
+                limit=limit,
+            )
+        dataset = self._require_client_dataset(dataset_id, dataset_version)
         records = build_interval_index(dataset)
+        if video_id is not None:
+            video_id = validate_identifier(video_id, field="video_id")
+            records = [record for record in records if record.video_id == video_id]
         page = records[offset : offset + limit]
         return IntervalListView(
             dataset_id=dataset.dataset_id,
@@ -270,16 +427,51 @@ class PortalReadService:
         offset: int = 0,
         limit: int = _DEFAULT_PICKER_PAGE,
     ) -> IntervalSearchView:
-        dataset = self._require_client_dataset(dataset_id, dataset_version)
+        dataset_id, dataset_version = self._require_published_ids(dataset_id, dataset_version)
         offset, limit = _clamp_page(offset, limit)
+        if self._store.dataset_layout == "video_catalog":
+            match_kind, matched, image_hit = search_active_videos(
+                self._store, dataset_id, dataset_version, query
+            )
+            total = len(matched)
+            page = matched[offset : offset + limit]
+            hits: list[IntervalSearchHitView] = []
+            for video, record in page:
+                target_image_id: str | None = None
+                target_frame_index: int | None = None
+                if (
+                    match_kind == "image"
+                    and image_hit is not None
+                    and image_hit[1].segment_id == record.segment_id
+                ):
+                    target_image_id = image_hit[1].frames[image_hit[2]].image_id
+                    target_frame_index = image_hit[2] + 1
+                hits.append(
+                    IntervalSearchHitView(
+                        interval=self._interval_meta_video(video, record),
+                        target_image_id=target_image_id,
+                        target_frame_index=target_frame_index,
+                    )
+                )
+            return IntervalSearchView(
+                dataset_id=dataset_id,
+                dataset_version=dataset_version,
+                query=query,
+                match_kind=match_kind,  # type: ignore[arg-type]
+                hits=hits,
+                total=total,
+                offset=offset,
+                limit=limit,
+            )
+        dataset = self._require_client_dataset(dataset_id, dataset_version)
         records = build_interval_index(dataset)
         match_kind, matched, image_hit = search_intervals(records, query)
         total = len(matched)
         page = matched[offset : offset + limit]
-        hits: list[IntervalSearchHitView] = []
+        hits = []
         for record in page:
-            target_image_id: str | None = None
-            target_frame_index: int | None = None
+            target_image_id = None
+            target_frame_index = None
             if (
                 match_kind == "image"
                 and image_hit is not None
@@ -307,19 +499,38 @@ class PortalReadService:
         )
 
     def get_interval_frames(
-        self, dataset_id: str, dataset_version: str, segment_id: str
+        self,
+        dataset_id: str,
+        dataset_version: str,
+        segment_id: str,
+        *,
+        video_id: str | None = None,
     ) -> IntervalFramesView:
-        dataset = self._require_client_dataset(dataset_id, dataset_version)
+        dataset_id, dataset_version = self._require_published_ids(dataset_id, dataset_version)
         segment_id = validate_identifier(segment_id, field="segment_id")
-        record = find_interval(build_interval_index(dataset), segment_id)
-        if record is None:
-            raise ResourceNotFoundError(
-                "Interval not found in dataset version.",
-                safe_context=(
-                    f"dataset_id={dataset_id} dataset_version={dataset_version} "
-                    f"segment_id={segment_id}"
-                ),
+        if video_id is not None:
+            video_id = validate_identifier(video_id, field="video_id")
+        if self._store.dataset_layout == "video_catalog":
+            video, record = resolve_interval(
+                self._store,
+                dataset_id,
+                dataset_version,
+                segment_id,
+                video_id=video_id,
             )
+            display_name = video.display_name
+        else:
+            dataset = self._require_client_dataset(dataset_id, dataset_version)
+            record = find_interval(build_interval_index(dataset), segment_id)
+            if record is None:
+                raise ResourceNotFoundError(
+                    "Interval not found in dataset version.",
+                    safe_context=(
+                        f"dataset_id={dataset_id} dataset_version={dataset_version} "
+                        f"segment_id={segment_id}"
+                    ),
+                )
+            display_name = dataset.display_name
         frames = [
             IntervalFrameMetaView(
                 image_id=frame.image_id,
@@ -330,14 +541,14 @@ class PortalReadService:
             for index, frame in enumerate(record.frames)
         ]
         return IntervalFramesView(
-            dataset_id=dataset.dataset_id,
-            dataset_version=dataset.dataset_version,
+            dataset_id=dataset_id,
+            dataset_version=dataset_version,
             segment_id=record.segment_id,
             video_id=record.video_id,
             video_filename=record.video_filename,
             start_seconds=record.start_seconds,
             end_seconds=record.end_seconds,
-            title=interval_title(dataset.display_name, record),
+            title=interval_title(display_name, record),
             image_count=record.image_count,
             frames=frames,
         )
@@ -349,11 +560,62 @@ class PortalReadService:
         image_id: str,
         *,
         run_id: str | None = None,
+        video_id: str | None = None,
     ) -> ImageFrameView:
         """Effective state for one image only (optional prediction for a run)."""
         catalog = self._load_catalog()
-        dataset = self._require_client_dataset(dataset_id, dataset_version)
+        dataset_id, dataset_version = self._require_published_ids(dataset_id, dataset_version)
         image_id = validate_identifier(image_id, field="image_id")
+        if video_id is not None:
+            video_id = validate_identifier(video_id, field="video_id")
+
+        if self._store.dataset_layout == "video_catalog":
+            resolved = resolve_image(
+                self._store,
+                dataset_id,
+                dataset_version,
+                image_id,
+                video_id=video_id,
+            )
+            video = resolved.video
+            image = resolved.image
+            dataset_proj = video.as_dataset_version()
+            effective = self._effective_image(dataset_proj, image)
+            display_id = image.provenance.display_id if image.provenance else None
+            segment_id = image.provenance.segment_id if image.provenance else None
+            video_id = image.provenance.video_id if image.provenance else None
+            position: int | None = None
+            image_count: int | None = None
+            if segment_id is not None:
+                record = find_interval(build_interval_index(dataset_proj), segment_id)
+                if record is not None:
+                    image_count = record.image_count
+                    for index, frame in enumerate(record.frames):
+                        if frame.image_id == image_id:
+                            position = index + 1
+                            break
+            prediction: PredictionView | None = None
+            if run_id is not None:
+                run = self._require_client_run(catalog, run_id)
+                if run.dataset_id != dataset_id or run.dataset_version != dataset_version:
+                    raise ResourceNotFoundError(
+                        "Run does not belong to the requested dataset version.",
+                        safe_context=f"run_id={run_id}",
+                    )
+                self._ensure_run_dataset_published(catalog, run)
+                predictions = self._store.load_predictions(run)
+                prediction = _prediction_view(predictions.by_image_id().get(image_id))
+            return ImageFrameView(
+                image=effective,
+                display_id=display_id,
+                segment_id=segment_id,
+                video_id=video_id,
+                position=position,
+                image_count=image_count,
+                prediction=prediction,
+            )
+
+        dataset = self._require_client_dataset(dataset_id, dataset_version)
         image = dataset.get_image(image_id)
         if image is None:
             raise ResourceNotFoundError(
@@ -367,8 +629,8 @@ class PortalReadService:
         display_id = image.provenance.display_id if image.provenance else None
         segment_id = image.provenance.segment_id if image.provenance else None
         video_id = image.provenance.video_id if image.provenance else None
-        position: int | None = None
-        image_count: int | None = None
+        position = None
+        image_count = None
         if segment_id is not None:
             record = find_interval(build_interval_index(dataset), segment_id)
             if record is not None:
@@ -378,7 +640,7 @@ class PortalReadService:
                         position = index + 1
                         break
 
-        prediction: PredictionView | None = None
+        prediction = None
         if run_id is not None:
             run = self._require_client_run(catalog, run_id)
             if (
@@ -409,9 +671,7 @@ class PortalReadService:
         catalog = self._load_catalog()
         run = self._require_client_run(catalog, run_id)
         self._ensure_run_dataset_published(catalog, run)
-        dataset = self._load_published_dataset(
-            run.dataset_id, run.dataset_version, from_catalog=True
-        )
+        dataset = self._require_dataset_for_joins(run.dataset_id, run.dataset_version)
         predictions = self._store.load_predictions(run)
         self._validate_predictions(dataset, predictions)
         metrics_view = self._load_metrics_view(run, dataset, predictions)
@@ -439,10 +699,24 @@ class PortalReadService:
             title=interval_title(dataset.display_name, record),
         )
 
+    def _interval_meta_video(
+        self, video: VideoArtifact, record: IntervalRecord
+    ) -> IntervalMetaView:
+        return IntervalMetaView(
+            segment_id=record.segment_id,
+            video_id=record.video_id,
+            video_filename=record.video_filename,
+            start_seconds=record.start_seconds,
+            end_seconds=record.end_seconds,
+            image_count=record.image_count,
+            first_image_id=record.first_image_id,
+            title=interval_title(video.display_name, record),
+        )
+
     def _load_catalog(self) -> Catalog:
         return self._store.load_catalog()
 
-    def _require_client_dataset(self, dataset_id: str, dataset_version: str) -> DatasetVersion:
+    def _require_published_ids(self, dataset_id: str, dataset_version: str) -> tuple[str, str]:
         catalog = self._load_catalog()
         dataset_id = validate_identifier(dataset_id, field="dataset_id")
         dataset_version = validate_identifier(dataset_version, field="dataset_version")
@@ -451,7 +725,64 @@ class PortalReadService:
                 "Dataset version not found.",
                 safe_context=(f"dataset_id={dataset_id} dataset_version={dataset_version}"),
             )
+        return dataset_id, dataset_version
+
+    def _require_client_dataset(self, dataset_id: str, dataset_version: str) -> DatasetVersion:
+        dataset_id, dataset_version = self._require_published_ids(dataset_id, dataset_version)
         return self._load_published_dataset(dataset_id, dataset_version, from_catalog=True)
+
+    def _require_dataset_for_joins(self, dataset_id: str, dataset_version: str) -> DatasetVersion:
+        """Dataset projection for summary/run joins (active videos only in video_catalog)."""
+        dataset_id, dataset_version = self._require_published_ids(dataset_id, dataset_version)
+        if self._store.dataset_layout == "video_catalog":
+            return self._compose_active_dataset(dataset_id, dataset_version)
+        return self._load_published_dataset(dataset_id, dataset_version, from_catalog=True)
+
+    def _compose_active_dataset(self, dataset_id: str, dataset_version: str) -> DatasetVersion:
+        pairs = iter_active_images(self._store, dataset_id, dataset_version)
+        if not pairs:
+            return DatasetVersion(
+                schema_version="1",  # type: ignore[arg-type]
+                dataset_id=dataset_id,
+                dataset_version=dataset_version,
+                display_name=f"{dataset_id} {dataset_version}",
+                description=None,
+                images=[],
+            )
+        first_video = pairs[0][0]
+        images = [image for _, image in pairs]
+        return DatasetVersion(
+            schema_version=first_video.schema_version,
+            dataset_id=dataset_id,
+            dataset_version=dataset_version,
+            display_name=first_video.display_name,
+            description=first_video.description,
+            images=images,
+        )
+
+    def _get_dataset_from_videos(self, dataset_id: str, dataset_version: str) -> DatasetDetailView:
+        dataset = self._require_dataset_for_joins(dataset_id, dataset_version)
+        images = [self._effective_image(dataset, image) for image in dataset.images]
+        return DatasetDetailView(
+            dataset_id=dataset.dataset_id,
+            dataset_version=dataset.dataset_version,
+            display_name=dataset.display_name,
+            description=dataset.description,
+            images=images,
+        )
+
+    def _load_published_video_catalog(
+        self, dataset_id: str, dataset_version: str, *, from_catalog: bool
+    ):
+        try:
+            return require_published_video_catalog(self._store, dataset_id, dataset_version)
+        except ResourceNotFoundError as exc:
+            if from_catalog:
+                raise InvalidArtifactError(
+                    "Catalog references a missing video catalog.",
+                    safe_context=(f"dataset_id={dataset_id} dataset_version={dataset_version}"),
+                ) from exc
+            raise
 
     def _require_client_run(self, catalog: Catalog, run_id: str) -> RunManifest:
         run_id = validate_identifier(run_id, field="run_id")
@@ -602,6 +933,56 @@ class PortalReadService:
                     "Evaluation snapshot image lacks a prediction.",
                     safe_context=f"image_id={item.image_id}",
                 )
+
+
+def _summary_interval_rows(
+    dataset: DatasetVersion,
+    effective_images: list[EffectiveImageView],
+) -> list[SummaryIntervalRow]:
+    """Build one Summary row per interval from the already-loaded effective images."""
+    if not dataset_has_provenance(dataset):
+        return []
+    effective_by_id = {image.image_id: image.effective_ground_truth for image in effective_images}
+    records = build_interval_index(dataset)
+    records_sorted = sorted(
+        records,
+        key=lambda record: (
+            record.video_filename.lower(),
+            record.start_seconds,
+            record.end_seconds,
+            record.segment_id,
+        ),
+    )
+    rows: list[SummaryIntervalRow] = []
+    for record in records_sorted:
+        labels: set[int] = set()
+        for frame in record.frames:
+            label = effective_by_id.get(frame.image_id)
+            if label is not None:
+                labels.add(int(label))
+        ground_truth: Literal[0, 1, "Mixed"]
+        if labels == {0}:
+            ground_truth = 0
+        elif labels == {1}:
+            ground_truth = 1
+        elif labels == {0, 1}:
+            ground_truth = "Mixed"
+        else:
+            # No effective labels resolved for this interval's frames.
+            ground_truth = "Mixed"
+        start = format_summary_clock(record.start_seconds)
+        end = format_summary_clock(record.end_seconds)
+        rows.append(
+            SummaryIntervalRow(
+                segment_id=record.segment_id,
+                video_id=record.video_id,
+                video_label=video_label_from_filename(record.video_filename),
+                time_interval=f"{start}–{end}",
+                ground_truth=ground_truth,
+                image_count=record.image_count,
+            )
+        )
+    return rows
 
 
 def _prediction_view(prediction: Prediction | None) -> PredictionView:

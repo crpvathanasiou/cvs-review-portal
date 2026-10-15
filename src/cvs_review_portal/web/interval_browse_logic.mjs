@@ -290,6 +290,7 @@ export async function executeLoadIntervalFrame(deps, segmentId, frameIndex, opti
       datasetVersion: token.datasetVersion,
       imageId: frame.image_id,
       runId: token.selectedRunId,
+      videoId: refreshed.videoId || null,
     });
     if (!intervalFrameLoadStillValid(token, deps)) {
       return { outcome: "stale" };
@@ -358,10 +359,12 @@ export async function executeEnsureIntervalFrames(deps, cardId) {
   };
 
   try {
+    const openForFetch = deps.findOpenIntervalByCardId(cardId);
     const framesView = await deps.fetchIntervalFrames({
       datasetId: token.datasetId,
       datasetVersion: token.datasetVersion,
       segmentId: token.segmentId,
+      videoId: (openForFetch && openForFetch.videoId) || null,
     });
     if (!intervalFramesEnsureStillValid(token, deps)) {
       return { outcome: "stale" };
@@ -371,6 +374,9 @@ export async function executeEnsureIntervalFrames(deps, cardId) {
     current.frames = Array.isArray(framesView.frames) ? framesView.frames : [];
     current.title = framesView.title || current.title;
     current.imageCount = framesView.image_count || current.frames.length;
+    if (framesView.video_id && !current.videoId) {
+      current.videoId = framesView.video_id;
+    }
     return { outcome: "ready", frames: current.frames };
   } catch (err) {
     if (!intervalFramesEnsureStillValid(token, deps)) {
@@ -384,7 +390,7 @@ export async function executeEnsureIntervalFrames(deps, cardId) {
  * Focus existing interval or create a new card instance for the segment.
  * @param {object} deps
  * @param {string} segmentId
- * @param {{ title?: string, imageCount?: number, targetImageId?: string | null }} [meta]
+ * @param {{ title?: string, imageCount?: number, targetImageId?: string | null, videoId?: string | null }} [meta]
  */
 export async function executeAddOrFocusInterval(deps, segmentId, meta) {
   const identity = deps.currentIdentity();
@@ -425,6 +431,7 @@ export async function executeAddOrFocusInterval(deps, segmentId, meta) {
     segmentId,
     title: (meta && meta.title) || segmentId,
     imageCount: (meta && meta.imageCount) || 0,
+    videoId: (meta && meta.videoId) || null,
   });
   deps.appendIntervalCard?.(card);
 

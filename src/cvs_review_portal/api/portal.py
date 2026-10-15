@@ -37,6 +37,8 @@ from cvs_review_portal.application.views import (
     RunListView,
     RunOverviewView,
     SummaryView,
+    VideoListView,
+    VideoPreviewView,
 )
 from cvs_review_portal.domain.errors import (
     DataStoreUnavailableError,
@@ -225,6 +227,56 @@ def get_browse(
 
 
 @router.get(
+    "/datasets/{dataset_id}/versions/{dataset_version}/videos",
+    response_model=VideoListView,
+)
+def list_videos(
+    dataset_id: str,
+    dataset_version: str,
+    service: Annotated[PortalReadService, Depends(get_portal_service)],
+) -> VideoListView:
+    try:
+        validate_identifier(dataset_id, field="dataset_id")
+        validate_identifier(dataset_version, field="dataset_version")
+        return service.list_videos(dataset_id, dataset_version)
+    except ResourceNotFoundError as exc:
+        raise _http_error(exc, 404) from exc
+    except DataStoreUnavailableError as exc:
+        raise _http_error(exc, 503) from exc
+    except InvalidArtifactError as exc:
+        logger.exception("invalid_artifact op=list_videos context=%s", exc.safe_context)
+        raise _http_error(exc, 500) from exc
+    except InvalidIdentifierError as exc:
+        raise _http_error(exc, 422) from exc
+
+
+@router.get(
+    "/datasets/{dataset_id}/versions/{dataset_version}/videos/{video_id}/preview",
+    response_model=VideoPreviewView,
+)
+def get_video_preview(
+    dataset_id: str,
+    dataset_version: str,
+    video_id: str,
+    service: Annotated[PortalReadService, Depends(get_portal_service)],
+) -> VideoPreviewView:
+    try:
+        validate_identifier(dataset_id, field="dataset_id")
+        validate_identifier(dataset_version, field="dataset_version")
+        validate_identifier(video_id, field="video_id")
+        return service.get_video_preview(dataset_id, dataset_version, video_id)
+    except ResourceNotFoundError as exc:
+        raise _http_error(exc, 404) from exc
+    except DataStoreUnavailableError as exc:
+        raise _http_error(exc, 503) from exc
+    except InvalidArtifactError as exc:
+        logger.exception("invalid_artifact op=get_video_preview context=%s", exc.safe_context)
+        raise _http_error(exc, 500) from exc
+    except InvalidIdentifierError as exc:
+        raise _http_error(exc, 422) from exc
+
+
+@router.get(
     "/datasets/{dataset_id}/versions/{dataset_version}/intervals",
     response_model=IntervalListView,
 )
@@ -234,11 +286,20 @@ def list_intervals(
     service: Annotated[PortalReadService, Depends(get_portal_service)],
     offset: Annotated[int, Query(ge=0)] = 0,
     limit: Annotated[int, Query(ge=1, le=100)] = 24,
+    video_id: Annotated[str | None, Query()] = None,
 ) -> IntervalListView:
     try:
         validate_identifier(dataset_id, field="dataset_id")
         validate_identifier(dataset_version, field="dataset_version")
-        return service.list_intervals(dataset_id, dataset_version, offset=offset, limit=limit)
+        if video_id is not None:
+            validate_identifier(video_id, field="video_id")
+        return service.list_intervals(
+            dataset_id,
+            dataset_version,
+            offset=offset,
+            limit=limit,
+            video_id=video_id,
+        )
     except ResourceNotFoundError as exc:
         raise _http_error(exc, 404) from exc
     except DataStoreUnavailableError as exc:
@@ -288,12 +349,17 @@ def get_interval_frames(
     dataset_version: str,
     segment_id: str,
     service: Annotated[PortalReadService, Depends(get_portal_service)],
+    video_id: Annotated[str | None, Query()] = None,
 ) -> IntervalFramesView:
     try:
         validate_identifier(dataset_id, field="dataset_id")
         validate_identifier(dataset_version, field="dataset_version")
         validate_identifier(segment_id, field="segment_id")
-        return service.get_interval_frames(dataset_id, dataset_version, segment_id)
+        if video_id is not None:
+            validate_identifier(video_id, field="video_id")
+        return service.get_interval_frames(
+            dataset_id, dataset_version, segment_id, video_id=video_id
+        )
     except ResourceNotFoundError as exc:
         raise _http_error(exc, 404) from exc
     except DataStoreUnavailableError as exc:
@@ -318,6 +384,7 @@ def get_image_frame_view(
     image_id: str,
     service: Annotated[PortalReadService, Depends(get_portal_service)],
     run_id: Annotated[str | None, Query()] = None,
+    video_id: Annotated[str | None, Query()] = None,
 ) -> ImageFrameView:
     try:
         validate_identifier(dataset_id, field="dataset_id")
@@ -325,7 +392,15 @@ def get_image_frame_view(
         validate_identifier(image_id, field="image_id")
         if run_id is not None:
             validate_identifier(run_id, field="run_id")
-        return service.get_image_frame_view(dataset_id, dataset_version, image_id, run_id=run_id)
+        if video_id is not None:
+            validate_identifier(video_id, field="video_id")
+        return service.get_image_frame_view(
+            dataset_id,
+            dataset_version,
+            image_id,
+            run_id=run_id,
+            video_id=video_id,
+        )
     except ResourceNotFoundError as exc:
         raise _http_error(exc, 404) from exc
     except DataStoreUnavailableError as exc:
@@ -368,14 +443,19 @@ def get_image_content(
     dataset_version: str,
     image_id: str,
     service: Annotated[PortalReadService, Depends(get_portal_service)],
+    video_id: Annotated[str | None, Query()] = None,
 ) -> Response:
     try:
         validate_identifier(dataset_id, field="dataset_id")
         validate_identifier(dataset_version, field="dataset_version")
         validate_identifier(image_id, field="image_id")
+        if video_id is not None:
+            validate_identifier(video_id, field="video_id")
         # Auth, catalog publication, membership, and path validation run above /
         # inside the service before any 304 is considered.
-        content, media_type = service.get_image_content(dataset_id, dataset_version, image_id)
+        content, media_type = service.get_image_content(
+            dataset_id, dataset_version, image_id, video_id=video_id
+        )
         etag = strong_etag_for_bytes(content)
         if if_none_match_satisfied(request.headers.get("if-none-match"), etag):
             not_modified = Response(status_code=304, content=b"")
@@ -407,12 +487,15 @@ def get_review(
     dataset_version: str,
     image_id: str,
     service: Annotated[PortalReviewService, Depends(get_review_service)],
+    video_id: Annotated[str | None, Query()] = None,
 ) -> GetReviewResponse:
     try:
         validate_identifier(dataset_id, field="dataset_id")
         validate_identifier(dataset_version, field="dataset_version")
         validate_identifier(image_id, field="image_id")
-        loaded = service.get_review(dataset_id, dataset_version, image_id)
+        if video_id is not None:
+            validate_identifier(video_id, field="video_id")
+        loaded = service.get_review(dataset_id, dataset_version, image_id, video_id=video_id)
         return GetReviewResponse(
             dataset_id=dataset_id,
             dataset_version=dataset_version,
@@ -443,11 +526,14 @@ def save_review_comments(
     body: SaveCommentsRequest,
     service: Annotated[PortalReviewService, Depends(get_review_service)],
     principal: Annotated[AuthenticatedPrincipal, Depends(require_principal)],
+    video_id: Annotated[str | None, Query()] = None,
 ) -> SaveCommentsResponse:
     try:
         validate_identifier(dataset_id, field="dataset_id")
         validate_identifier(dataset_version, field="dataset_version")
         validate_identifier(image_id, field="image_id")
+        if video_id is not None:
+            validate_identifier(video_id, field="video_id")
         result = service.save_comments(
             dataset_id=dataset_id,
             dataset_version=dataset_version,
@@ -455,6 +541,7 @@ def save_review_comments(
             comments=body.comments,
             expected_revision=body.expected_revision,
             actor=principal.actor,
+            video_id=video_id,
         )
         return SaveCommentsResponse(
             current=_review_state(result.current),

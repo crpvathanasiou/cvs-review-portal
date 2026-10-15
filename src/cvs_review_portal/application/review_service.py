@@ -10,6 +10,7 @@ from cvs_review_portal.application.ports import (
     ReviewMutationResult,
     ReviewWriteCommit,
 )
+from cvs_review_portal.application.video_resolve import resolve_image
 from cvs_review_portal.domain.constants import (
     MAX_COMMENT_LENGTH,
     MAX_REVIEW_DOCUMENT_BYTES,
@@ -48,9 +49,14 @@ class PortalReviewService:
         self._store = store
 
     def get_review(
-        self, dataset_id: str, dataset_version: str, image_id: str
+        self,
+        dataset_id: str,
+        dataset_version: str,
+        image_id: str,
+        *,
+        video_id: str | None = None,
     ) -> LoadedReview | None:
-        dataset = self._require_image(dataset_id, dataset_version, image_id)
+        dataset = self._require_image(dataset_id, dataset_version, image_id, video_id=video_id)
         return self._store.load_review(dataset.dataset_id, dataset.dataset_version, image_id)
 
     def save_comments(
@@ -62,6 +68,7 @@ class PortalReviewService:
         comments: str,
         expected_revision: int,
         actor: str,
+        video_id: str | None = None,
     ) -> SaveCommentsResult:
         if len(comments) > MAX_COMMENT_LENGTH:
             raise ReviewMutationRejectedError(
@@ -75,7 +82,7 @@ class PortalReviewService:
                 safe_context="field=actor",
             )
 
-        dataset = self._require_image(dataset_id, dataset_version, image_id)
+        dataset = self._require_image(dataset_id, dataset_version, image_id, video_id=video_id)
         now = datetime.now(UTC)
 
         def mutator(current: LoadedReview | None) -> ReviewWriteCommit:
@@ -162,17 +169,34 @@ class PortalReviewService:
             )
 
     def _require_image(
-        self, dataset_id: str, dataset_version: str, image_id: str
+        self,
+        dataset_id: str,
+        dataset_version: str,
+        image_id: str,
+        *,
+        video_id: str | None = None,
     ) -> DatasetVersion:
         dataset_id = validate_identifier(dataset_id, field="dataset_id")
         dataset_version = validate_identifier(dataset_version, field="dataset_version")
         image_id = validate_identifier(image_id, field="image_id")
+        if video_id is not None:
+            video_id = validate_identifier(video_id, field="video_id")
         catalog = self._store.load_catalog()
         if not catalog.has_dataset(dataset_id, dataset_version):
             raise ResourceNotFoundError(
                 "Dataset version not found.",
                 safe_context=f"dataset_id={dataset_id} dataset_version={dataset_version}",
             )
+        if self._store.dataset_layout == "video_catalog":
+            # Recheck CSV membership; prefer direct video when provided.
+            resolved = resolve_image(
+                self._store,
+                dataset_id,
+                dataset_version,
+                image_id,
+                video_id=video_id,
+            )
+            return resolved.video.as_dataset_version()
         try:
             dataset = self._store.load_dataset(dataset_id, dataset_version)
         except ResourceNotFoundError as exc:
