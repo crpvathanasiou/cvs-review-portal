@@ -1,6 +1,6 @@
 # CVS Review Portal — Semi-Technical Project Reference
 
-> **LEGACY DOCUMENT.** This file describes a compliance document-ingestion / OpenSearch / AWS system inherited from a template. It is **not** the current product specification for the CVS Review Portal (dataset/run review of Engine exports). Canonical current specification: [`08_portal_specification.md`](08_portal_specification.md). Retain for history only; do not implement from this file.
+> **LEGACY DOCUMENT.** This file describes a compliance document-ingestion / OpenSearch / AWS system inherited from a template. It is **not** the current product specification for the CVS Review Portal (dataset/run review of Engine exports). Reading order: [`../../README.md`](../../README.md). Current specification: [`08_portal_specification.md`](08_portal_specification.md). Retain for history only; do not implement from this file.
 
 # 1. Executive Summary
 

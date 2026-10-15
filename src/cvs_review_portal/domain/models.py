@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any, Literal
 
@@ -34,6 +35,7 @@ __all__ = (
     "DatasetVersion",
     "EvaluationImage",
     "EvaluationSnapshot",
+    "ImageProvenance",
     "MetricsArtifact",
     "ModelInfo",
     "Prediction",
@@ -103,11 +105,50 @@ class Catalog(PortalModel):
         return any(ref.run_id == run_id for ref in self.runs)
 
 
+class ImageProvenance(PortalModel):
+    """Optional per-image source provenance (interval/video frame identity).
+
+    Absent (``None``) for datasets that do not carry export provenance, including
+    existing demo fixtures. Technical ``image_id`` values remain unchanged.
+    """
+
+    video_id: str
+    video_filename: str
+    segment_id: str
+    start_seconds: NonNegativeInt
+    end_seconds: NonNegativeInt
+    frame_index: NonNegativeInt
+    timestamp: float
+    display_id: str
+
+    @field_validator("video_id", "segment_id", "display_id")
+    @classmethod
+    def _ids(cls, value: str, info: ValidationInfo) -> str:
+        return validate_identifier(value, field=str(info.field_name))
+
+    @field_validator("video_filename")
+    @classmethod
+    def _video_filename(cls, value: str) -> str:
+        cleaned = value.strip()
+        if not cleaned or cleaned != value:
+            raise ValueError("video_filename must be a non-empty exact filename")
+        return cleaned
+
+    @model_validator(mode="after")
+    def _bounds(self) -> ImageProvenance:
+        if self.end_seconds < self.start_seconds:
+            raise ValueError("end_seconds must be >= start_seconds")
+        if not math.isfinite(self.timestamp):
+            raise ValueError("timestamp must be a finite number")
+        return self
+
+
 class DatasetImage(PortalModel):
     image_id: str
     raw_image_key: str
     ground_truth: BinaryLabel
     comments: str | None = None
+    provenance: ImageProvenance | None = None
 
     @field_validator("image_id")
     @classmethod
@@ -136,10 +177,16 @@ class DatasetVersion(PortalModel):
     @model_validator(mode="after")
     def _unique_image_ids(self) -> DatasetVersion:
         seen: set[str] = set()
+        seen_display: set[str] = set()
         for image in self.images:
             if image.image_id in seen:
                 raise ValueError(f"Duplicate image_id in dataset: {image.image_id}")
             seen.add(image.image_id)
+            if image.provenance is not None:
+                display_id = image.provenance.display_id
+                if display_id in seen_display:
+                    raise ValueError(f"Duplicate provenance.display_id in dataset: {display_id}")
+                seen_display.add(display_id)
         return self
 
     def image_ids(self) -> set[str]:

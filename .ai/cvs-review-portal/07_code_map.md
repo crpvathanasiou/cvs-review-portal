@@ -1,115 +1,143 @@
 # 07 — Code Map
 
-## 1. Purpose and Authority
+Maps current behavior to repository paths. Product rules live in [08_portal_specification.md](08_portal_specification.md). Commands and the Docker context gap live in [../../README.md](../../README.md). Checkpoint status lives in [06_common_handoff.md](06_common_handoff.md).
 
-Maps implemented responsibilities to repository locations. Updated after meaningful code changes.
-
-Architectural/product authority for the portal is `08_portal_specification.md`. Inherited `00_*` / `01_*` / `02_*` / `04_*` files are legacy.
-
----
-
-## 2. Status Legend
+Inherited `00_*`, `01_*`, `02_*`, and `04_*` files are legacy template content.
 
 ```text
-CURRENT      → Exists now
-PLANNED      → Documented for a later step, not implemented
-NOT_IMPLEMENTED → Referenced capability absent
+CURRENT          → implemented in this repository
+PLANNED          → described for later; not implemented
+NOT_IMPLEMENTED  → explicitly absent
 ```
 
 ---
 
-## 3. Current Repository Summary
+## 1. Behavior to path
 
-Step 3 MVP finishing pass: comments-only Save (latest comment + revision concurrency), identity boundary, Azure Blob adapter, in-place UI draft chrome. No audit history UI/API.
+| Behavior | Path |
+| --- | --- |
+| Domain contracts, binary labels, provenance, catalog rules | `src/cvs_review_portal/domain/models.py` |
+| Identifier and storage-key rules | `src/cvs_review_portal/domain/identifiers.py` |
+| Comment length 8000; review JSON byte cap | `src/cvs_review_portal/domain/constants.py` |
+| Review read projection (schema v1 and readable v2) | `src/cvs_review_portal/domain/review_document.py` |
+| Typed portal errors | `src/cvs_review_portal/domain/errors.py` |
+| Storage and identity ports | `src/cvs_review_portal/application/ports.py`, `src/cvs_review_portal/application/identity.py` |
+| Interval grouping, order, titles, video/image search | `src/cvs_review_portal/application/interval_index.py` |
+| Read use cases: browse, intervals, frame view, run overview, summary | `src/cvs_review_portal/application/portal_service.py` |
+| Read response models | `src/cvs_review_portal/application/views.py` |
+| Comments-only Save and revision check | `src/cvs_review_portal/application/review_service.py` |
+| Cholec80 join, unused rows, overlap conflicts, copy, catalog-last write | `src/cvs_review_portal/importers/cholec80.py`, `scripts/import_cholec80.py` |
+| Local files, atomic review write, review path | `src/cvs_review_portal/infrastructure/local_store.py` |
+| Azure Blob adapter (same prefixes; ETag conditional writes) | `src/cvs_review_portal/infrastructure/azure_blob_store.py` |
+| Review JSON codec | `src/cvs_review_portal/infrastructure/review_codec.py` |
+| Path containment | `src/cvs_review_portal/infrastructure/paths.py` |
+| Loopback development identity | `src/cvs_review_portal/infrastructure/identity_dev.py` |
+| Azure App Service header identity (`aad:{tid}:{oid}`) | `src/cvs_review_portal/infrastructure/identity_azure.py` |
+| Settings and fail-closed validation | `src/cvs_review_portal/settings.py` |
+| App factory, open probes, protected routes | `src/cvs_review_portal/main.py` |
+| Store and identity construction | `src/cvs_review_portal/api/deps.py` |
+| JSON + same-origin mutation guard | `src/cvs_review_portal/api/auth.py` |
+| HTTP routes | `src/cvs_review_portal/api/portal.py` |
+| Save request/response models | `src/cvs_review_portal/api/review_schemas.py` |
+| Image `Cache-Control` / ETag / `304` | `src/cvs_review_portal/api/image_cache.py` |
+| UI package mount (`/` and `/ui-assets`; data root not mounted) | `src/cvs_review_portal/api/ui.py` |
+| HTML shell and script registration | `src/cvs_review_portal/web/index.html` |
+| Cards, picker, paging, thumbnails, summary button, draft memory | `src/cvs_review_portal/web/app.js` |
+| Save outcomes: conflict, unconfirmed, draft preservation | `src/cvs_review_portal/web/review_save_logic.mjs` |
+| Registers Save logic as `globalThis.CvsReviewSaveLogic` | `src/cvs_review_portal/web/register_save_logic.mjs` |
+| Interval async guards, revision reconcile, Previous/Next index | `src/cvs_review_portal/web/interval_browse_logic.mjs` |
+| Registers interval logic as `globalThis.CvsIntervalBrowseLogic` | `src/cvs_review_portal/web/register_interval_browse_logic.mjs` |
+| Styles | `src/cvs_review_portal/web/styles.css` |
+| Synthetic demo bundle | `scripts/generate_demo_data.py` |
+| Local server on port 18080 | `scripts/dev.ps1` |
+| Container port 8000, no data copy | `Dockerfile`, `docker-compose.yaml`, `.dockerignore` |
 
-* Package `src/cvs_review_portal/` with `domain/`, `application/`, `infrastructure/`, `api/`, `web/`
-* Factory `create_app(settings)` with lifespan store/identity wiring; entry `cvs_review_portal.main:app`
-* System routes `/health`, `/ready`, `/version` (intentionally open)
-* Protected `/api/*`, `/`, `/ui-assets/*` via identity middleware
-* Review write routes under `/api/.../review` and `/history`
-* Settings: `DATA_ROOT`, `STORAGE_BACKEND`, Azure Blob URL/container, `IDENTITY_MODE`, actors
+`index.html` loads the modules in this order:
+
+```html
+<script type="module" src="/ui-assets/register_save_logic.mjs"></script>
+<script type="module" src="/ui-assets/register_interval_browse_logic.mjs"></script>
+<script src="/ui-assets/app.js" defer></script>
+```
+
+`app.js` calls the registered module functions. The `.mjs` files are the production logic under test in `tests/js/`.
 
 ---
 
-## 4. Application Code Map
+## 2. Layout
 
-| Path | Status | Responsibility |
-| ---- | ------ | -------------- |
-| `src/cvs_review_portal/main.py` | CURRENT | `create_app`; lifespan; access middleware |
-| `src/cvs_review_portal/settings.py` | CURRENT | Local/Azure storage + identity settings |
-| `src/cvs_review_portal/domain/constants.py` | CURRENT | Max comment length; max review document bytes |
-| `src/cvs_review_portal/domain/models.py` | CURRENT | Schema v1 artifacts including `ReviewRecord` |
-| `src/cvs_review_portal/domain/review_document.py` | CURRENT | LoadedReview projection; v2 read-compat models |
-| `src/cvs_review_portal/domain/errors.py` | CURRENT | Auth, conflict, mutation, size, artifact, availability errors |
-| `src/cvs_review_portal/application/ports.py` | CURRENT | `PortalDataStore` + atomic `mutate_review` (ReviewRecord write) |
-| `src/cvs_review_portal/application/portal_service.py` | CURRENT | Read composition; `persisted_revision`; published-dataset lookup |
-| `src/cvs_review_portal/application/review_service.py` | CURRENT | Comments-only Save; revision concurrency |
-| `src/cvs_review_portal/application/identity.py` | CURRENT | Principal + IdentityProvider Protocol |
-| `src/cvs_review_portal/infrastructure/local_store.py` | CURRENT | Local reads + filelock atomic review writes |
-| `src/cvs_review_portal/infrastructure/azure_blob_store.py` | CURRENT | Blob reads + ETag conditional writes |
-| `src/cvs_review_portal/infrastructure/review_codec.py` | CURRENT | Parse v1/v2; serialize v1 ReviewRecord |
-| `src/cvs_review_portal/infrastructure/identity_dev.py` | CURRENT | Loopback development identity |
-| `src/cvs_review_portal/infrastructure/identity_azure.py` | CURRENT | App Service identity; canonical `aad:{tid}:{oid}` |
-| `src/cvs_review_portal/api/deps.py` | CURRENT | Store/identity/service DI builders |
-| `src/cvs_review_portal/api/auth.py` | CURRENT | Principal dependency; JSON/CSRF mutation guard |
-| `src/cvs_review_portal/api/portal.py` | CURRENT | Read + review write routes (no history) |
-| `src/cvs_review_portal/api/review_schemas.py` | CURRENT | Save request/response models |
-| `src/cvs_review_portal/web/review_save_logic.mjs` | CURRENT | Production Save-state (conflict / unconfirmed) |
-| `src/cvs_review_portal/web/register_save_logic.mjs` | CURRENT | Exposes Save logic to classic `app.js` |
-| `src/cvs_review_portal/web/*` | CURRENT | In-place draft chrome; Save/Discard; conflict/unconfirmed |
+```text
+src/cvs_review_portal/
+  domain/           contracts and invariants
+  application/      read services, interval index, review writes, ports
+  infrastructure/   local store, Azure Blob store, identity adapters
+  api/              HTTP, auth, image cache headers, UI registration
+  web/              HTML, CSS, app.js, production .mjs modules
+  importers/        offline Cholec80 preparation
+scripts/            demo generator, import CLI, quality and dev PowerShell
+tests/              pytest
+tests/js/           node:test for production Save and interval modules
+```
+
+Factory: `create_app` in `src/cvs_review_portal/main.py`. Uvicorn entry: `cvs_review_portal.main:app`.
+
+Open routes: `/health`, `/ready`, `/version`, `/docs`, `/openapi.json`, `/redoc`. `/ready` reports process configuration only.
+
+Protected routes: `/`, `/ui-assets/*`, `/api/*`.
 
 ---
 
-## 5. API and UI Routes
+## 3. API routes
 
 | Method | Path | Status |
-| ------ | ---- | ------ |
-| GET | `/` | CURRENT (portal HTML; auth-protected) |
-| GET | `/ui-assets/*` | CURRENT (auth-protected) |
-| GET | `/health` | CURRENT (open) |
-| GET | `/ready` | CURRENT (open; not Azure/dataset readiness) |
-| GET | `/version` | CURRENT (open) |
+| --- | --- | --- |
+| GET | `/` | CURRENT |
+| GET | `/ui-assets/*` | CURRENT |
+| GET | `/health`, `/ready`, `/version` | CURRENT (open) |
 | GET | `/api/datasets` | CURRENT |
-| GET | `/api/datasets/{dataset_id}/versions/{dataset_version}` | CURRENT (+ `persisted_revision`) |
+| GET | `/api/datasets/{dataset_id}/versions/{dataset_version}` | CURRENT |
+| GET | `/api/datasets/.../browse` | CURRENT |
+| GET | `/api/datasets/.../intervals` | CURRENT |
+| GET | `/api/datasets/.../intervals/search` | CURRENT |
+| GET | `/api/datasets/.../intervals/{segment_id}/frames` | CURRENT |
+| GET | `/api/datasets/.../images/{image_id}/view` | CURRENT |
+| GET | `/api/datasets/.../images/{image_id}/content` | CURRENT (private cache + ETag) |
+| GET | `/api/datasets/.../images/{image_id}/review` | CURRENT |
+| PUT | `/api/datasets/.../images/{image_id}/review` | CURRENT |
+| GET | `/api/datasets/.../summary` | CURRENT |
 | GET | `/api/runs` | CURRENT |
 | GET | `/api/runs/{run_id}` | CURRENT |
-| GET | `/api/datasets/.../summary` | CURRENT |
-| GET | `/api/datasets/.../images/{image_id}/content` | CURRENT |
-| GET | `/api/datasets/.../images/{image_id}/review` | CURRENT |
-| PUT | `/api/datasets/.../images/{image_id}/review` | CURRENT (comments-only Save) |
+| GET | `/api/runs/{run_id}/overview` | CURRENT |
+
+Default interval page size is 24 (`limit` 1–100) in `api/portal.py` and `PICKER_PAGE_SIZE` in `app.js`.
 
 ---
 
-## 6. Test Code Map
+## 4. Tests
 
-| Path | Status | Coverage focus |
-| ---- | ------ | -------------- |
-| `tests/test_review_save.py` | CURRENT | Save, empty, reload, GT preserve, stale conflict, cross-process concurrency |
-| `tests/test_azure_blob_store.py` | CURRENT | Conditional create/update + conflict mapping (mocked SDK) |
-| `tests/test_step3_corrections.py` | CURRENT | UI Save wiring, empty reload, history removed, actor/artifact checks |
-| `tests/js/save_async_guards.test.mjs` | CURRENT | Production Save logic: run-switch, unconfirmed, conflict, draft preserve |
-| `tests/test_portal_api.py` | CURRENT | Read composition / publication boundary |
-| `tests/test_ui_readonly_gt.py` | CURRENT | Read-only GT + Save UI contracts |
-| `tests/fixture_trees.py` | CURRENT | `make_settings` with development identity |
+| Path | Focus |
+| --- | --- |
+| `tests/test_review_save.py` | Save, empty comment, reload, ground-truth preservation, stale revision, cross-process conflict |
+| `tests/test_step3_corrections.py` | UI Save wiring, history absent |
+| `tests/js/save_async_guards.test.mjs` | Production Save logic |
+| `tests/js/interval_nav_save.test.mjs` | Stale dataset response, revision reconcile, navigation/Save isolation |
+| `tests/test_interval_browse.py` | Grouping, order, search, browse APIs |
+| `tests/test_image_content_cache.py` | Cache-Control, ETag, 304, error `no-store` |
+| `tests/test_cholec80_import.py` | Join, unused rows, dry-run, empty destination |
+| `tests/test_ui_readonly_gt.py` | Read-only ground truth |
+| `tests/test_azure_blob_store.py` | Conditional Blob writes (mocked SDK) |
+| `tests/test_portal_api.py` | Publication boundary |
+| `tests/test_settings.py` | Settings validation |
 
 ---
 
-## 7. Planned (not implemented)
+## 5. Not in this repository
 
 | Item | Status |
-| ---- | ------ |
-| Azure resource provisioning / deployment / Easy Auth cloud verification | PLANNED |
-| Ground-truth creation/editing sub-portal | NOT_IMPLEMENTED |
-
----
-
-## 8. Current Snapshot
-
-```text
-Ground truth: read-only in review portal
-Comments: Save + history + concurrency + Step 3 corrections implemented locally
-Storage: local + Azure Blob adapter (config-selected; no silent fallback)
-Identity: explicit modes; Azure canonical aad:{tid}:{oid}; development loopback-only
-Exact next action: owner local Save verification + external review of corrections before Azure setup
-External approval: NOT CLAIMED
-```
+| --- | --- |
+| Azure account, storage resources, upload, Easy Auth, deployment, live verification | PLANNED |
+| Performance changes for search and frame navigation | Deferred; limitation still open |
+| Ground-truth editing sub-portal | NOT_IMPLEMENTED |
+| Audit history UI/API | NOT_IMPLEMENTED |
+| Separate thumbnail files | NOT_IMPLEMENTED |
+| Inference runs for the imported Cholec80 dataset | NOT_IMPLEMENTED (catalog `runs` is empty) |

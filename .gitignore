@@ -24,3 +24,4 @@ __pycache__/
 
 # === Project Specific Files ===
 template-setup-steps.txt
+/cholec80-data/

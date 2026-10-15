@@ -4,7 +4,7 @@
 
 This document defines the project-wide code quality and engineering standards for CVS Review Portal.
 
-> **Applicability note.** General engineering rules in this file (structure, typing, Pydantic, FastAPI factory, errors, logging, tests, Ruff/Pyright) **remain in force**. Examples that mention compliance documents, S3, OpenSearch, boto3, Processing Runs, AWS, or LLM/RAG flows are **inherited illustrations**, not CVS Review Portal product requirements. Product boundaries and Step contracts: [`08_portal_specification.md`](08_portal_specification.md).
+> **Applicability note.** General engineering rules in this file (structure, typing, Pydantic, FastAPI factory, errors, logging, tests, Ruff/Pyright) **remain in force**. Examples that mention compliance documents, S3, OpenSearch, boto3, Processing Runs, AWS, or LLM/RAG flows are **inherited illustrations**, not CVS Review Portal product requirements. Reading order and topic homes: [`../../README.md`](../../README.md). Product behavior: [`08_portal_specification.md`](08_portal_specification.md).
 
 It applies to:
 

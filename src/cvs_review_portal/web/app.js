@@ -1,9 +1,11 @@
 /**
- * CVS Review Portal — Step 3 UI
+ * CVS Review Portal — Step 2B / Step 3 UI
  *
  * Same-origin fetch against /api. All API text is rendered via textContent /
  * safe DOM APIs. Drafts live in memory only, keyed by dataset identity + image_id.
  * Comments-only Save uses expected_revision concurrency (latest comment only).
+ * Provenance-backed datasets browse by interval; datasets without provenance keep
+ * per-image cards.
  */
 (() => {
   "use strict";
@@ -24,6 +26,7 @@
   const NO_PREDICTION = "No prediction";
   const METRICS_SNAPSHOT_NOTE =
     "Metrics use the ground-truth snapshot recorded for this run.";
+  const PICKER_PAGE_SIZE = 24;
 
   /** @param {unknown} value */
   function isBinaryLabel(value) {
@@ -211,18 +214,54 @@
     datasets: [],
     /** @type {string | null} datasetKey */
     selectedDatasetKey: null,
-    /** @type {any | null} */
+    /** @type {any | null} full effective image list (image browse mode only) */
     datasetDetail: null,
+    /** @type {any | null} lightweight browse header (always set when a dataset is loaded) */
+    browseMeta: null,
+    /** @type {"interval"|"image"|null} */
+    browseMode: null,
     /** @type {any[]} */
     runs: [],
     /** @type {string | null} */
     selectedRunId: null,
     /** @type {any | null} */
     runDetail: null,
+    /** @type {any | null} run overview without per-image rows (interval mode) */
+    runOverview: null,
     /** @type {any | null} */
     summary: null,
-    /** @type {string[]} */
+    /** Explicit summary scan has been loaded for the current dataset/run context */
+    summaryLoaded: false,
+    /** Loaded summary may be stale after comment Saves */
+    summaryStale: false,
+    summaryLoading: false,
+    /** @type {string[]} image IDs (image browse mode) */
     openCards: [],
+    /**
+     * Open interval cards (interval browse mode).
+     * @type {Array<{
+     *   cardId: string,
+     *   segmentId: string,
+     *   title: string,
+     *   imageCount: number,
+     *   frames: any[] | null,
+     *   currentIndex: number,
+     *   currentImage: any | null,
+     *   displayId: string | null,
+     *   prediction: any | null,
+     *   loadGen: number,
+     *   status: "idle"|"loading"|"error",
+     *   errorMessage: string | null,
+     * }>}
+     */
+    openIntervals: [],
+    /** Monotonic id so remove/reopen cannot accept a prior card's responses. */
+    intervalCardSeq: 0,
+    /** @type {Map<string, any>} dataset/version/image → EffectiveImageView cache */
+    imageCache: new Map(),
+    pickerSession: 0,
+    pickerRequestId: 0,
+    activeBatchId: 0,
     /** @type {Map<string, {comments: string}>} */
     drafts: new Map(),
     /**
@@ -252,9 +291,20 @@
     /** @type {string | null} run/dataset-only load failure for the current selection */
     runLoadError: null,
     summarySearch: "",
-    /** @type {Set<string>} */
+    /** @type {Set<string>} segment_id or image_id depending on browse mode */
     pickerSelected: new Set(),
     pickerSearch: "",
+    pickerOffset: 0,
+    /** @type {any | null} */
+    pickerResults: null,
+    pickerLoading: false,
+    /** @type {string | null} */
+    pickerError: null,
+    /** When image search hits, map segment_id → target image_id */
+    /** @type {Map<string, string>} */
+    pickerTargetImages: new Map(),
+    /** Results are usable only when they match this request id and picker is not loading. */
+    pickerResultsRequestId: 0,
     /** @type {HTMLElement | null} */
     lastFocus: null,
     viewer: {
@@ -295,13 +345,38 @@
     analyticalEmpty: document.getElementById("analytical-empty"),
     summaryDraftNotice: document.getElementById("summary-draft-notice"),
     executiveDraftNotice: document.getElementById("executive-draft-notice"),
+    summaryLoadBar: document.getElementById("summary-load-bar"),
+    summaryLoadBtn: /** @type {HTMLButtonElement | null} */ (
+      document.getElementById("summary-load-btn")
+    ),
+    summaryStaleNotice: document.getElementById("summary-stale-notice"),
+    summaryToolbar: document.getElementById("summary-toolbar"),
     summarySearch: /** @type {HTMLInputElement} */ (document.getElementById("summary-search")),
     summaryRowCount: document.getElementById("summary-row-count"),
     summaryTableWrap: document.getElementById("summary-table-wrap"),
+    executiveLoadBar: document.getElementById("executive-load-bar"),
+    executiveLoadBtn: /** @type {HTMLButtonElement | null} */ (
+      document.getElementById("executive-load-btn")
+    ),
+    executiveStaleNotice: document.getElementById("executive-stale-notice"),
     executiveContent: document.getElementById("executive-content"),
     pickerModal: document.getElementById("picker-modal"),
+    pickerTitle: document.getElementById("picker-title"),
+    pickerSearchLabel: document.getElementById("picker-search-label"),
     pickerSearch: /** @type {HTMLInputElement} */ (document.getElementById("picker-search")),
+    pickerMatchInfo: document.getElementById("picker-match-info"),
     pickerGrid: document.getElementById("picker-grid"),
+    pickerPager: document.getElementById("picker-pager"),
+    pickerPrevPage: /** @type {HTMLButtonElement | null} */ (
+      document.getElementById("picker-prev-page")
+    ),
+    pickerNextPage: /** @type {HTMLButtonElement | null} */ (
+      document.getElementById("picker-next-page")
+    ),
+    pickerPageLabel: document.getElementById("picker-page-label"),
+    pickerAddAllBtn: /** @type {HTMLButtonElement | null} */ (
+      document.getElementById("picker-add-all-btn")
+    ),
     pickerAddBtn: /** @type {HTMLButtonElement} */ (document.getElementById("picker-add-btn")),
     pickerSelectionCount: document.getElementById("picker-selection-count"),
     viewerModal: document.getElementById("viewer-modal"),
@@ -322,11 +397,67 @@
   // ---------------------------------------------------------------------------
 
   function currentDatasetIdentity() {
-    if (!state.datasetDetail) return null;
+    const meta = state.browseMeta || state.datasetDetail;
+    if (!meta) return null;
     return {
-      datasetId: state.datasetDetail.dataset_id,
-      datasetVersion: state.datasetDetail.dataset_version,
+      datasetId: meta.dataset_id,
+      datasetVersion: meta.dataset_version,
     };
+  }
+
+  function isIntervalBrowse() {
+    return state.browseMode === "interval";
+  }
+
+  function markSummaryStale() {
+    if (!state.summaryLoaded || !state.summary) return;
+    state.summaryStale = true;
+    updateSummaryStaleNotices();
+  }
+
+  function updateSummaryStaleNotices() {
+    const message = state.summaryStale
+      ? "Summary needs refresh — comments or reviews changed since it was loaded. Effective ground-truth counts may be outdated."
+      : null;
+    for (const node of [dom.summaryStaleNotice, dom.executiveStaleNotice]) {
+      if (!node) continue;
+      if (!message) {
+        node.hidden = true;
+        clearChildren(node);
+        continue;
+      }
+      clearChildren(node);
+      node.appendChild(document.createTextNode(message));
+      const refresh = el("button", {
+        type: "button",
+        className: "btn btn-secondary btn-sm",
+        text: "Refresh summary",
+      });
+      refresh.addEventListener("click", () => loadSummaryExplicit({ force: true }));
+      node.appendChild(refresh);
+      node.hidden = false;
+    }
+  }
+
+  function syncSummaryLoadBars() {
+    const needsExplicit = isIntervalBrowse();
+    const showLoad = needsExplicit && !state.summaryLoaded;
+    if (dom.summaryLoadBar) dom.summaryLoadBar.hidden = !showLoad;
+    if (dom.executiveLoadBar) dom.executiveLoadBar.hidden = !showLoad;
+    if (dom.summaryToolbar) dom.summaryToolbar.hidden = needsExplicit && !state.summaryLoaded;
+    if (dom.summaryLoadBtn) {
+      dom.summaryLoadBtn.disabled = state.summaryLoading;
+      dom.summaryLoadBtn.textContent = state.summaryLoading
+        ? "Loading summary…"
+        : "Load effective summary";
+    }
+    if (dom.executiveLoadBtn) {
+      dom.executiveLoadBtn.disabled = state.summaryLoading;
+      dom.executiveLoadBtn.textContent = state.summaryLoading
+        ? "Loading summary…"
+        : "Load executive summary";
+    }
+    updateSummaryStaleNotices();
   }
 
   function hasAnyDrafts() {
@@ -516,7 +647,7 @@
       dom.runSelect.appendChild(opt);
     }
     dom.runSelect.value = state.selectedRunId || "";
-    dom.runSelect.disabled = !state.datasetDetail;
+    dom.runSelect.disabled = !currentDatasetIdentity();
   }
 
   /**
@@ -546,10 +677,27 @@
     state.selectedDatasetKey = key;
     state.selectedRunId = null;
     state.datasetDetail = null;
+    state.browseMeta = null;
+    state.browseMode = null;
     state.runDetail = null;
+    state.runOverview = null;
     state.summary = null;
+    state.summaryLoaded = false;
+    state.summaryStale = false;
+    state.summaryLoading = false;
     state.runs = [];
     state.openCards = [];
+    state.openIntervals = [];
+    state.intervalCardSeq = 0;
+    state.imageCache = new Map();
+    state.activeBatchId += 1;
+    state.pickerSession += 1;
+    state.pickerRequestId += 1;
+    state.pickerResults = null;
+    state.pickerResultsRequestId = 0;
+    state.pickerLoading = false;
+    state.pickerError = null;
+    state.pickerSelected = new Set();
     state.error = null;
     state.runLoadError = null;
     state.loading = true;
@@ -558,13 +706,48 @@
     renderAll();
 
     try {
-      const [detail, runsView, summary] = await Promise.all([
+      const [browse, runsView] = await Promise.all([
         apiGet(
-          `/api/datasets/${encodeURIComponent(datasetId)}/versions/${encodeURIComponent(datasetVersion)}`,
+          `/api/datasets/${encodeURIComponent(datasetId)}/versions/${encodeURIComponent(datasetVersion)}/browse`,
           signal,
         ),
         apiGet(
           `/api/runs?dataset_id=${encodeURIComponent(datasetId)}&dataset_version=${encodeURIComponent(datasetVersion)}`,
+          signal,
+        ),
+      ]);
+      if (gen !== state.selectionGen) return;
+
+      state.browseMeta = browse;
+      state.browseMode = browse.browse_mode === "interval" ? "interval" : "image";
+      state.runs = Array.isArray(runsView.runs) ? runsView.runs : [];
+
+      if (state.browseMode === "interval") {
+        // Interval datasets: do not scan all reviews or ship every image record.
+        state.datasetDetail = null;
+        state.summary = null;
+        state.summaryLoaded = false;
+        state.openIntervals = [];
+        state.openCards = [];
+        if (dom.addFramesBtn) {
+          clearChildren(dom.addFramesBtn);
+          dom.addFramesBtn.appendChild(document.createTextNode("+ Add intervals"));
+          dom.addFramesBtn.disabled = false;
+        }
+        state.loading = false;
+        setSelectionStatus(
+          state.runs.length === 0
+            ? `Interval dataset loaded · ${browse.interval_count} interval(s), ${browse.image_count} image(s) (no published runs).`
+            : `Interval dataset loaded · ${browse.interval_count} interval(s), ${browse.image_count} image(s) · ${state.runs.length} run(s).`,
+        );
+        populateRunSelect();
+        renderAll();
+        return;
+      }
+
+      const [detail, summary] = await Promise.all([
+        apiGet(
+          `/api/datasets/${encodeURIComponent(datasetId)}/versions/${encodeURIComponent(datasetVersion)}`,
           signal,
         ),
         apiGet(
@@ -575,11 +758,17 @@
       if (gen !== state.selectionGen) return;
 
       state.datasetDetail = detail;
-      state.runs = Array.isArray(runsView.runs) ? runsView.runs : [];
       state.summary = summary;
+      state.summaryLoaded = true;
+      state.summaryStale = false;
       state.openCards = [];
       if (Array.isArray(detail.images) && detail.images.length > 0) {
         state.openCards.push(detail.images[0].image_id);
+      }
+      if (dom.addFramesBtn) {
+        clearChildren(dom.addFramesBtn);
+        dom.addFramesBtn.appendChild(document.createTextNode("+ Add frames"));
+        dom.addFramesBtn.disabled = false;
       }
       state.loading = false;
       setSelectionStatus(
@@ -606,6 +795,9 @@
    * Preserves dataset detail, open cards, and drafts. Clears prior run predictions
    * and summary/metrics immediately so stale values cannot remain on screen.
    *
+   * Interval browse mode loads run overview only (no full-image review scan) and
+   * leaves the effective summary for an explicit Load action.
+   *
    * @param {string | null} runId
    * @param {{ force?: boolean }} [options]
    */
@@ -626,15 +818,51 @@
     state.selectedRunId = runId;
     // Drop previous run-scoped data immediately (including historical metrics).
     state.runDetail = null;
+    state.runOverview = null;
     state.summary = null;
+    state.summaryLoaded = false;
+    state.summaryStale = false;
     state.error = null;
     state.runLoadError = null;
     state.loading = true;
     populateRunSelect();
-    setSelectionStatus(runId ? `Loading run ${runId}…` : "Loading dataset summary…");
+    setSelectionStatus(
+      runId
+        ? `Loading run ${runId}…`
+        : isIntervalBrowse()
+          ? "Dataset only — no run selected"
+          : "Loading dataset summary…",
+    );
     refreshRunDependentViews();
 
     try {
+      if (isIntervalBrowse()) {
+        /** @type {any | null} */
+        let overview = null;
+        if (runId) {
+          overview = await apiGet(`/api/runs/${encodeURIComponent(runId)}/overview`, signal);
+          if (gen !== state.selectionGen) return;
+        }
+        state.runOverview = overview;
+        state.runDetail = null;
+        state.summary = null;
+        state.summaryLoaded = false;
+        state.loading = false;
+        state.runLoadError = null;
+        setSelectionStatus(
+          runId ? `Run selected: ${runId}` : "Dataset only — no run selected",
+        );
+        // Reload predictions for currently open interval frames only (targeted; keep textareas).
+        for (const card of state.openIntervals) {
+          void loadIntervalFrame(card.segmentId, card.currentIndex, {
+            predictionRefresh: true,
+          });
+        }
+        refreshRunDependentViews();
+        renderSelectionBanner();
+        return;
+      }
+
       let summaryPath =
         `/api/datasets/${encodeURIComponent(identity.datasetId)}` +
         `/versions/${encodeURIComponent(identity.datasetVersion)}/summary`;
@@ -660,7 +888,10 @@
       }
 
       state.runDetail = runDetail;
+      state.runOverview = null;
       state.summary = summary;
+      state.summaryLoaded = true;
+      state.summaryStale = false;
       state.loading = false;
       state.runLoadError = null;
       setSelectionStatus(
@@ -672,7 +903,9 @@
       if (gen !== state.selectionGen) return;
       state.loading = false;
       state.runDetail = null;
+      state.runOverview = null;
       state.summary = null;
+      state.summaryLoaded = false;
       const msg = errorMessage(err);
       if (!msg) return;
       state.runLoadError = msg;
@@ -684,6 +917,51 @@
     }
   }
 
+  /**
+   * Explicit effective-summary scan (required for interval browse; optional refresh).
+   * @param {{ force?: boolean }} [options]
+   */
+  async function loadSummaryExplicit(options) {
+    const force = Boolean(options && options.force);
+    const identity = currentDatasetIdentity();
+    if (!identity) return;
+    if (state.summaryLoaded && !state.summaryStale && !force) return;
+    const gen = state.selectionGen;
+    const runId = state.selectedRunId;
+    state.summaryLoading = true;
+    syncSummaryLoadBars();
+    try {
+      let path =
+        `/api/datasets/${encodeURIComponent(identity.datasetId)}` +
+        `/versions/${encodeURIComponent(identity.datasetVersion)}/summary`;
+      if (runId) path += `?run_id=${encodeURIComponent(runId)}`;
+      const summary = await apiGet(path);
+      if (gen !== state.selectionGen) return;
+      const current = currentDatasetIdentity();
+      if (
+        !current ||
+        current.datasetId !== identity.datasetId ||
+        current.datasetVersion !== identity.datasetVersion
+      ) {
+        return;
+      }
+      if ((state.selectedRunId || null) !== (runId || null)) return;
+      state.summary = summary;
+      state.summaryLoaded = true;
+      state.summaryStale = false;
+      state.summaryLoading = false;
+      syncSummaryLoadBars();
+      renderSummary();
+      renderExecutive();
+    } catch (err) {
+      if (gen !== state.selectionGen) return;
+      state.summaryLoading = false;
+      syncSummaryLoadBars();
+      const msg = errorMessage(err) || "Failed to load summary.";
+      showBanner(msg, "error");
+    }
+  }
+
   /** Refresh run-scoped UI without rebuilding frame cards (preserves drafts/caret). */
   function refreshRunDependentViews() {
     renderRunInfo();
@@ -692,7 +970,9 @@
     renderSummary();
     renderExecutive();
     renderSelectionBanner();
-    dom.addFramesBtn.disabled = !state.datasetDetail || state.loading;
+    const canAdd = Boolean(currentDatasetIdentity()) && !state.loading;
+    dom.addFramesBtn.disabled = !canAdd;
+    syncSummaryLoadBars();
   }
 
   function clearDraftsForCurrentDataset() {
@@ -704,17 +984,101 @@
   // Image / prediction lookups
   // ---------------------------------------------------------------------------
 
+  /** @returns {typeof globalThis.CvsIntervalBrowseLogic} */
+  function intervalLogic() {
+    const logic = globalThis.CvsIntervalBrowseLogic;
+    if (!logic) {
+      throw new Error("Interval browse logic module failed to load.");
+    }
+    return logic;
+  }
+
   /** @param {string} imageId */
   function findImage(imageId) {
+    const identity = currentDatasetIdentity();
+    if (identity) {
+      const key = intervalLogic().imageCacheKey(
+        identity.datasetId,
+        identity.datasetVersion,
+        imageId,
+      );
+      const cached = state.imageCache.get(key);
+      if (cached) return cached;
+    }
     if (!state.datasetDetail || !Array.isArray(state.datasetDetail.images)) return null;
     return state.datasetDetail.images.find((img) => img.image_id === imageId) || null;
   }
 
+  /**
+   * @param {string} datasetId
+   * @param {string} datasetVersion
+   * @param {string} imageId
+   * @param {any} image
+   */
+  function cacheImageForIdentity(datasetId, datasetVersion, imageId, image) {
+    const key = intervalLogic().imageCacheKey(datasetId, datasetVersion, imageId);
+    state.imageCache.set(key, image);
+    if (
+      state.datasetDetail &&
+      state.datasetDetail.dataset_id === datasetId &&
+      state.datasetDetail.dataset_version === datasetVersion &&
+      Array.isArray(state.datasetDetail.images)
+    ) {
+      const idx = state.datasetDetail.images.findIndex((img) => img.image_id === imageId);
+      if (idx >= 0) state.datasetDetail.images[idx] = image;
+    }
+  }
+
+  /** @param {string} imageId @param {any} image */
+  function cacheImage(imageId, image) {
+    const identity = currentDatasetIdentity();
+    if (!identity) return;
+    cacheImageForIdentity(identity.datasetId, identity.datasetVersion, imageId, image);
+  }
+
   /** @param {string} imageId */
   function findPrediction(imageId) {
+    if (isIntervalBrowse()) {
+      const card = state.openIntervals.find(
+        (item) => item.currentImage && item.currentImage.image_id === imageId,
+      );
+      if (card && card.prediction) return card.prediction;
+      return null;
+    }
     if (!state.runDetail || !Array.isArray(state.runDetail.images)) return null;
     const row = state.runDetail.images.find((item) => item.image && item.image.image_id === imageId);
     return row ? row.prediction : null;
+  }
+
+  /** @param {string} segmentId */
+  function findOpenInterval(segmentId) {
+    return state.openIntervals.find((item) => item.segmentId === segmentId) || null;
+  }
+
+  /** @param {string} cardId */
+  function findOpenIntervalByCardId(cardId) {
+    return state.openIntervals.find((item) => item.cardId === cardId) || null;
+  }
+
+  /**
+   * @param {{ segmentId: string, title: string, imageCount: number }} args
+   */
+  function createOpenIntervalCard(args) {
+    state.intervalCardSeq += 1;
+    return {
+      cardId: `card-${state.intervalCardSeq}`,
+      segmentId: args.segmentId,
+      title: args.title,
+      imageCount: args.imageCount,
+      frames: null,
+      currentIndex: 0,
+      currentImage: null,
+      displayId: null,
+      prediction: null,
+      loadGen: 0,
+      status: "loading",
+      errorMessage: null,
+    };
   }
 
   /** @param {any} image */
@@ -843,6 +1207,8 @@
     } else {
       image.effective_comments = image.original_comments;
     }
+    cacheImage(args.imageId, image);
+    markSummaryStale();
     return true;
   }
 
@@ -871,6 +1237,11 @@
       errorMessage,
       applyPersistedReview: applyPersistedReviewToImage,
       refreshSummary: async (token) => {
+        if (isIntervalBrowse()) {
+          // Avoid a full-dataset review scan on every Save in interval mode.
+          markSummaryStale();
+          return;
+        }
         await refreshSummaryQuiet({
           datasetId: token.datasetId,
           datasetVersion: token.datasetVersion,
@@ -924,6 +1295,9 @@
       }
       if ((state.selectedRunId || null) !== (runId || null)) return;
       state.summary = summary;
+      state.summaryLoaded = true;
+      state.summaryStale = false;
+      syncSummaryLoadBars();
       renderSummary();
       renderExecutive();
     } catch {
@@ -934,11 +1308,21 @@
   /** @param {string} imageId */
   function refreshCardFieldsAfterSave(imageId) {
     if (!dom.frameCards) return;
+    const image = findImage(imageId);
+    if (!image) return;
+    if (isIntervalBrowse()) {
+      const open = state.openIntervals.find(
+        (item) => item.currentImage && item.currentImage.image_id === imageId,
+      );
+      if (!open) return; // Navigated away — do not move the card back.
+      open.currentImage = image;
+      updateIntervalCardDom(open);
+      return;
+    }
     const card = /** @type {HTMLElement | null} */ (
       dom.frameCards.querySelector(`[data-image-id="${cssEscape(imageId)}"]`)
     );
-    const image = findImage(imageId);
-    if (!card || !image) return;
+    if (!card) return;
     refreshCardFields(card, image);
   }
 
@@ -1010,7 +1394,8 @@
     renderSummary();
     renderExecutive();
     renderSelectionBanner();
-    dom.addFramesBtn.disabled = !state.datasetDetail || state.loading;
+    dom.addFramesBtn.disabled = !currentDatasetIdentity() || state.loading;
+    syncSummaryLoadBars();
   }
 
   function updateDatasetMeta() {
@@ -1022,12 +1407,22 @@
       }
       return;
     }
-    const d = state.datasetDetail;
+    const d = state.browseMeta || state.datasetDetail;
+    if (!d) return;
+    const imageCount =
+      typeof d.image_count === "number"
+        ? d.image_count
+        : Array.isArray(state.datasetDetail && state.datasetDetail.images)
+          ? state.datasetDetail.images.length
+          : 0;
     const parts = [
       `${d.display_name}`,
       `${d.dataset_id} / ${d.dataset_version}`,
-      `${Array.isArray(d.images) ? d.images.length : 0} image(s)`,
+      `${imageCount} image(s)`,
     ];
+    if (isIntervalBrowse() && typeof d.interval_count === "number") {
+      parts.push(`${d.interval_count} interval(s)`);
+    }
     if (d.description) parts.push(d.description);
     dom.datasetMeta.appendChild(document.createTextNode(parts.join(" · ")));
   }
@@ -1066,7 +1461,8 @@
       panel.appendChild(el("p", { className: "muted", text: "Loading run details…" }));
       return;
     }
-    if (state.runLoadError || !state.runDetail) {
+    const run = isIntervalBrowse() ? state.runOverview : state.runDetail;
+    if (state.runLoadError || !run) {
       panel.hidden = false;
       panel.appendChild(
         el("p", {
@@ -1079,7 +1475,6 @@
       return;
     }
 
-    const run = state.runDetail;
     panel.hidden = false;
     const grid = el("div", { className: "run-info-grid" });
 
@@ -1132,7 +1527,7 @@
     clearChildren(empty);
     empty.hidden = true;
 
-    if (!state.datasetDetail) {
+    if (!currentDatasetIdentity()) {
       if (state.loading) {
         empty.hidden = false;
         empty.appendChild(el("p", { text: "Loading dataset…" }));
@@ -1153,6 +1548,17 @@
       if (dom.analyticalHint) {
         clearChildren(dom.analyticalHint);
       }
+      return;
+    }
+
+    if (isIntervalBrowse()) {
+      renderAnalyticalIntervals(cardsRoot, empty);
+      return;
+    }
+
+    if (!state.datasetDetail) {
+      empty.hidden = false;
+      empty.appendChild(el("p", { text: "Dataset detail is unavailable." }));
       return;
     }
 
@@ -1194,8 +1600,44 @@
     }
   }
 
+  /**
+   * @param {HTMLElement} cardsRoot
+   * @param {HTMLElement} empty
+   */
+  function renderAnalyticalIntervals(cardsRoot, empty) {
+    if (state.openIntervals.length === 0) {
+      empty.hidden = false;
+      empty.appendChild(el("p", { text: "No intervals open in this view." }));
+      empty.appendChild(
+        el("p", {
+          text: "Use “+ Add intervals” to search by video or image and open interval cards. Removing a card only hides it from this view.",
+        }),
+      );
+    }
+
+    if (dom.analyticalHint) {
+      clearChildren(dom.analyticalHint);
+      const hint = state.selectedRunId
+        ? `Interval browse · predictions for run ${state.selectedRunId} load per selected frame. Reviews stay per image.`
+        : "Interval browse · dataset-only view — predictions are hidden until a run is selected.";
+      dom.analyticalHint.appendChild(document.createTextNode(hint));
+    }
+
+    for (const open of state.openIntervals) {
+      cardsRoot.appendChild(buildIntervalCard(open));
+    }
+  }
+
   function renderCardsPredictionsOnly() {
     if (!dom.frameCards) return;
+    if (isIntervalBrowse()) {
+      for (const open of state.openIntervals) {
+        if (!open.currentImage) continue;
+        updateIntervalCardPredictionInPlace(open);
+      }
+      renderRunInfo();
+      return;
+    }
     for (const imageId of state.openCards) {
       const card = dom.frameCards.querySelector(`[data-image-id="${cssEscape(imageId)}"]`);
       const image = findImage(imageId);
@@ -1207,6 +1649,381 @@
       }
     }
     renderRunInfo();
+  }
+
+  /**
+   * @param {{
+   *   cardId: string,
+   *   segmentId: string,
+   *   title: string,
+   *   imageCount: number,
+   *   frames: any[] | null,
+   *   currentIndex: number,
+   *   currentImage: any | null,
+   *   displayId: string | null,
+   *   prediction: any | null,
+   *   loadGen: number,
+   *   status: string,
+   *   errorMessage: string | null,
+   * }} open
+   */
+  function buildIntervalCard(open) {
+    const image = open.currentImage;
+    const draft = image ? effectiveDraft(image) : { comments: "", dirty: false };
+    const op = image ? saveOpForImage(image.image_id) : null;
+    const card = el("article", {
+      className: `frame-card${draft.dirty || op ? " is-draft" : ""}`,
+      "data-card-id": open.cardId,
+      "data-segment-id": open.segmentId,
+      "data-image-id": image ? image.image_id : "",
+    });
+
+    const header = el("div", { className: "frame-card-header" });
+    header.appendChild(el("h3", { text: open.title }));
+    header.appendChild(
+      el("span", {
+        className: "count",
+        text: `${open.imageCount} image${open.imageCount === 1 ? "" : "s"}`,
+      }),
+    );
+    card.appendChild(header);
+
+    if (image) {
+      const bannerText = cardBannerText(image);
+      if (bannerText) {
+        card.appendChild(
+          el("div", { className: "draft-banner", "data-role": "draft-banner", text: bannerText }),
+        );
+      }
+    }
+
+    const body = el("div", { className: "frame-body" });
+    body.appendChild(buildIntervalMediaColumn(open));
+    if (image && open.status !== "loading") {
+      body.appendChild(buildDetailsColumn(image, draft));
+    } else if (open.status === "error") {
+      const errCol = el("div", { className: "frame-details" });
+      errCol.appendChild(
+        el("p", {
+          className: "save-error",
+          text: open.errorMessage || "Failed to load frame.",
+        }),
+      );
+      const retry = el("button", {
+        type: "button",
+        className: "btn btn-secondary btn-sm",
+        text: "Retry",
+      });
+      retry.addEventListener("click", () =>
+        loadIntervalFrame(open.segmentId, open.currentIndex),
+      );
+      errCol.appendChild(retry);
+      body.appendChild(errCol);
+    } else {
+      const loadingCol = el("div", { className: "frame-details" });
+      loadingCol.appendChild(el("p", { className: "muted", text: "Loading frame…" }));
+      body.appendChild(loadingCol);
+    }
+
+    const removeRow = el("div", { className: "frame-actions" });
+    const remove = el("button", {
+      type: "button",
+      className: "btn btn-danger-ghost btn-sm",
+      text: "Remove from view",
+      title:
+        "Removes this interval card from the current view only. Does not delete images or reviews.",
+    });
+    remove.addEventListener("click", () => removeIntervalCard(open.segmentId));
+    removeRow.appendChild(remove);
+    if (!(image && open.status !== "loading")) {
+      body.appendChild(removeRow);
+    }
+    card.appendChild(body);
+    return card;
+  }
+
+  /**
+   * @param {typeof state.openIntervals[number]} open
+   */
+  function buildIntervalMediaColumn(open) {
+    const identity = currentDatasetIdentity();
+    const col = el("div", { className: "frame-media" });
+    const wrap = el("div", {
+      className: `frame-image-wrap${open.status === "loading" ? " is-meta-loading" : ""}`,
+    });
+    const status = el("div", {
+      className: "image-status",
+      "data-role": "image-status",
+      text: open.status === "error" ? open.errorMessage || "Failed to load." : "Loading image…",
+    });
+    if (open.status === "error") status.dataset.kind = "error";
+    wrap.appendChild(status);
+
+    const img = el("img", {
+      className: "frame-image is-pending",
+      alt: open.currentImage
+        ? `Original image ${open.currentImage.image_id}`
+        : `Interval ${open.segmentId}`,
+      decoding: "async",
+    });
+
+    const markLoaded = () => {
+      status.hidden = true;
+      delete status.dataset.kind;
+      img.classList.remove("is-pending");
+      img.classList.add("is-loaded");
+    };
+    const markError = () => {
+      img.classList.remove("is-loaded");
+      img.classList.add("is-pending");
+      status.hidden = false;
+      status.dataset.kind = "error";
+      clearChildren(status);
+      status.appendChild(document.createTextNode("Image failed to load."));
+    };
+
+    img.addEventListener("load", markLoaded);
+    img.addEventListener("error", markError);
+
+    if (open.currentImage && open.status !== "loading" && identity) {
+      const imageId = open.currentImage.image_id;
+      img.addEventListener("click", () => openViewer(imageId, img));
+      img.src = imageContentUrl(identity.datasetId, identity.datasetVersion, imageId);
+      if (img.complete && img.naturalWidth > 0) markLoaded();
+      else if (img.complete && img.naturalWidth === 0 && img.getAttribute("src")) markError();
+    }
+
+    wrap.appendChild(img);
+    col.appendChild(wrap);
+
+    const nav = el("div", { className: "interval-nav" });
+    const prev = el("button", {
+      type: "button",
+      className: "btn btn-secondary btn-sm",
+      text: "Previous",
+      disabled: open.currentIndex <= 0 || open.status === "loading",
+    });
+    prev.addEventListener("click", () => navigateInterval(open.segmentId, -1));
+    const next = el("button", {
+      type: "button",
+      className: "btn btn-secondary btn-sm",
+      text: "Next",
+      disabled:
+        !open.frames ||
+        open.currentIndex >= open.frames.length - 1 ||
+        open.status === "loading",
+    });
+    next.addEventListener("click", () => navigateInterval(open.segmentId, 1));
+    const pos = open.frames
+      ? `${open.currentIndex + 1} / ${open.frames.length}`
+      : `— / ${open.imageCount}`;
+    nav.appendChild(prev);
+    nav.appendChild(el("span", { className: "interval-position", text: pos }));
+    nav.appendChild(next);
+    col.appendChild(nav);
+
+    const ids = el("div", { className: "interval-ids" });
+    if (open.displayId) {
+      ids.appendChild(el("div", { className: "display-id", text: open.displayId }));
+    }
+    if (open.currentImage) {
+      ids.appendChild(
+        el("div", {
+          className: "tech-id",
+          text: `image_id: ${open.currentImage.image_id}`,
+        }),
+      );
+    }
+    col.appendChild(ids);
+
+    if (open.currentImage && open.status !== "loading") {
+      const zoomBtn = el("button", {
+        type: "button",
+        className: "btn btn-secondary btn-sm",
+        text: "Zoom / open viewer",
+      });
+      zoomBtn.addEventListener("click", () =>
+        openViewer(open.currentImage.image_id, zoomBtn),
+      );
+      col.appendChild(zoomBtn);
+    }
+    return col;
+  }
+
+  /**
+   * @param {typeof state.openIntervals[number]} open
+   */
+  function findIntervalCardElement(open) {
+    if (!dom.frameCards || !open) return null;
+    return /** @type {HTMLElement | null} */ (
+      dom.frameCards.querySelector(`[data-card-id="${cssEscape(open.cardId)}"]`)
+    );
+  }
+
+  /**
+   * Replace only the affected interval card DOM node (preserve siblings' textareas).
+   * @param {typeof state.openIntervals[number]} open
+   */
+  function updateIntervalCardDom(open) {
+    if (!dom.frameCards) return;
+    syncIntervalEmptyState();
+    const existing = findIntervalCardElement(open);
+    const replacement = buildIntervalCard(open);
+    if (existing) {
+      existing.replaceWith(replacement);
+    } else {
+      dom.frameCards.appendChild(replacement);
+    }
+  }
+
+  /**
+   * Update prediction host in place when the current image identity is unchanged.
+   * @param {typeof state.openIntervals[number]} open
+   */
+  function updateIntervalCardPredictionInPlace(open) {
+    const card = findIntervalCardElement(open);
+    if (!card || !open.currentImage) {
+      updateIntervalCardDom(open);
+      return;
+    }
+    card.setAttribute("data-image-id", open.currentImage.image_id);
+    const predHost = card.querySelector("[data-role='prediction-block']");
+    if (predHost) {
+      clearChildren(predHost);
+      predHost.appendChild(buildPredictionBlock(open.currentImage.image_id));
+    }
+  }
+
+  function syncIntervalEmptyState() {
+    const empty = dom.analyticalEmpty;
+    if (!empty) return;
+    if (!isIntervalBrowse()) return;
+    if (state.openIntervals.length === 0) {
+      clearChildren(empty);
+      empty.hidden = false;
+      empty.appendChild(el("p", { text: "No intervals open in this view." }));
+      empty.appendChild(
+        el("p", {
+          text: "Use “+ Add intervals” to search by video or image and open interval cards. Removing a card only hides it from this view.",
+        }),
+      );
+    } else {
+      empty.hidden = true;
+      clearChildren(empty);
+    }
+  }
+
+  /** @param {string} segmentId @param {number} delta */
+  function navigateInterval(segmentId, delta) {
+    const open = findOpenInterval(segmentId);
+    if (!open || !open.frames) return;
+    const next = intervalLogic().nextFrameIndex(open.currentIndex, delta, open.frames.length);
+    if (next == null) return;
+    void loadIntervalFrame(segmentId, next);
+  }
+
+  function intervalBrowseDeps() {
+    const logic = intervalLogic();
+    return {
+      currentIdentity: currentDatasetIdentity,
+      selectedRunId: () => state.selectedRunId || null,
+      selectionGen: () => state.selectionGen,
+      findOpenInterval,
+      findOpenIntervalByCardId,
+      getCachedImage: (datasetId, datasetVersion, imageId) => {
+        const key = logic.imageCacheKey(datasetId, datasetVersion, imageId);
+        return state.imageCache.get(key) || null;
+      },
+      setCachedImage: cacheImageForIdentity,
+      fetchFrameView: async ({ datasetId, datasetVersion, imageId, runId }) => {
+        let path =
+          `/api/datasets/${encodeURIComponent(datasetId)}` +
+          `/versions/${encodeURIComponent(datasetVersion)}` +
+          `/images/${encodeURIComponent(imageId)}/view`;
+        if (runId) path += `?run_id=${encodeURIComponent(runId)}`;
+        return apiGet(path);
+      },
+      fetchIntervalFrames: async ({ datasetId, datasetVersion, segmentId }) =>
+        apiGet(
+          `/api/datasets/${encodeURIComponent(datasetId)}` +
+            `/versions/${encodeURIComponent(datasetVersion)}` +
+            `/intervals/${encodeURIComponent(segmentId)}/frames`,
+        ),
+      ensureIntervalFrames: (cardId) =>
+        logic.executeEnsureIntervalFrames(intervalBrowseDeps(), cardId),
+      loadIntervalFrame: (segmentId, frameIndex, options) =>
+        loadIntervalFrame(segmentId, frameIndex, options),
+      createOpenIntervalCard,
+      appendIntervalCard: (card) => {
+        state.openIntervals.push(card);
+        updateIntervalCardDom(card);
+      },
+      setActiveTabAnalytical: () => setActiveTab("analytical"),
+      focusIntervalCard,
+      onCardLoading: (open) => updateIntervalCardDom(open),
+      onCardUpdated: (open) => updateIntervalCardDom(open),
+      onCardPredictionPending: () => {
+        /* keep existing card UI while prediction refresh is in flight */
+      },
+      onCardPredictionUpdated: (open) => updateIntervalCardPredictionInPlace(open),
+      onPredictionError: (err) => {
+        const msg = errorMessage(err);
+        if (msg) showBanner(`Prediction refresh failed: ${msg}`, "warning");
+      },
+      errorMessage,
+    };
+  }
+
+  /**
+   * @param {string} segmentId
+   * @param {number} frameIndex
+   * @param {{ predictionRefresh?: boolean }} [options]
+   */
+  async function loadIntervalFrame(segmentId, frameIndex, options) {
+    return intervalLogic().executeLoadIntervalFrame(
+      intervalBrowseDeps(),
+      segmentId,
+      frameIndex,
+      options,
+    );
+  }
+
+  /** @param {string} cardId */
+  async function ensureIntervalFrames(cardId) {
+    return intervalLogic().executeEnsureIntervalFrames(intervalBrowseDeps(), cardId);
+  }
+
+  /**
+   * @param {string} segmentId
+   * @param {{ title?: string, imageCount?: number, targetImageId?: string | null }} [meta]
+   */
+  async function addOrFocusInterval(segmentId, meta) {
+    return intervalLogic().executeAddOrFocusInterval(intervalBrowseDeps(), segmentId, meta);
+  }
+
+  /** @param {string} segmentId */
+  function removeIntervalCard(segmentId) {
+    const open = findOpenInterval(segmentId);
+    if (!open) return;
+    // Drop this card instance so in-flight responses for cardId cannot apply later.
+    state.openIntervals = state.openIntervals.filter((item) => item.cardId !== open.cardId);
+    const elCard = findIntervalCardElement(open);
+    if (elCard) elCard.remove();
+    syncIntervalEmptyState();
+  }
+
+  /** @param {string} segmentId */
+  function focusIntervalCard(segmentId) {
+    setActiveTab("analytical");
+    const open = findOpenInterval(segmentId);
+    const card = open ? findIntervalCardElement(open) : null;
+    if (card instanceof HTMLElement) {
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+      card.classList.add("is-focused");
+      window.setTimeout(() => card.classList.remove("is-focused"), 1600);
+      const focusable = card.querySelector("button, select, textarea, input");
+      if (focusable instanceof HTMLElement) focusable.focus();
+    }
   }
 
   /** @param {any} image */
@@ -1442,7 +2259,7 @@
       text: "Remove from view",
       title: "Removes this card from the current view only. Does not delete the image or review.",
     });
-    remove.addEventListener("click", () => removeCard(image.image_id));
+    remove.addEventListener("click", () => removeFromView(image.image_id));
     actions.appendChild(remove);
     col.appendChild(actions);
 
@@ -1504,7 +2321,10 @@
       wrap.appendChild(el("span", { className: "muted", text: "Loading prediction…" }));
       return wrap;
     }
-    if (state.runLoadError || !state.runDetail) {
+    const runReady = isIntervalBrowse()
+      ? Boolean(state.runOverview)
+      : Boolean(state.runDetail);
+    if (state.runLoadError || !runReady) {
       wrap.appendChild(
         el("span", {
           className: "muted",
@@ -1625,6 +2445,18 @@
     renderAnalytical();
   }
 
+  /** @param {string} imageId */
+  function removeFromView(imageId) {
+    if (isIntervalBrowse()) {
+      const open = state.openIntervals.find(
+        (item) => item.currentImage && item.currentImage.image_id === imageId,
+      );
+      if (open) removeIntervalCard(open.segmentId);
+      return;
+    }
+    removeCard(imageId);
+  }
+
   /** @param {string[]} imageIds */
   function addCards(imageIds) {
     /** @type {string | null} */
@@ -1663,18 +2495,162 @@
   // ---------------------------------------------------------------------------
 
   function openPicker() {
-    if (!state.datasetDetail) return;
+    if (!currentDatasetIdentity()) return;
+    state.pickerSession += 1;
+    state.pickerRequestId += 1;
     state.pickerSelected = new Set();
     state.pickerSearch = "";
+    state.pickerOffset = 0;
+    state.pickerResults = null;
+    state.pickerResultsRequestId = 0;
+    state.pickerError = null;
+    state.pickerLoading = false;
+    state.pickerTargetImages = new Map();
     dom.pickerSearch.value = "";
-    renderPicker();
+    if (dom.pickerTitle) {
+      clearChildren(dom.pickerTitle);
+      dom.pickerTitle.appendChild(
+        document.createTextNode(isIntervalBrowse() ? "Add intervals" : "Add frames"),
+      );
+    }
+    if (dom.pickerSearchLabel) {
+      clearChildren(dom.pickerSearchLabel);
+      dom.pickerSearchLabel.appendChild(
+        document.createTextNode(
+          isIntervalBrowse()
+            ? "Search video name, video ID, image ID, or display ID"
+            : "Search by image ID",
+        ),
+      );
+    }
+    if (dom.pickerAddAllBtn) {
+      dom.pickerAddAllBtn.hidden = !isIntervalBrowse();
+      dom.pickerAddAllBtn.disabled = true;
+    }
     openModal(dom.pickerModal, dom.addFramesBtn);
     dom.pickerSearch.focus();
+    if (isIntervalBrowse()) {
+      void loadIntervalPickerPage();
+    } else {
+      renderPicker();
+    }
+  }
+
+  let pickerSearchTimer = 0;
+
+  function scheduleIntervalPickerSearch() {
+    if (pickerSearchTimer) window.clearTimeout(pickerSearchTimer);
+    pickerSearchTimer = window.setTimeout(() => {
+      state.pickerOffset = 0;
+      void loadIntervalPickerPage();
+    }, 200);
+  }
+
+  function pickerDeps() {
+    return {
+      currentIdentity: currentDatasetIdentity,
+      pickerSession: () => state.pickerSession,
+      pickerRequestId: () => state.pickerRequestId,
+      pickerSearch: () => state.pickerSearch,
+      pickerOffset: () => state.pickerOffset,
+      selectionGen: () => state.selectionGen,
+    };
+  }
+
+  function pickerResultsAreActionable() {
+    return (
+      !state.pickerLoading &&
+      state.pickerResults != null &&
+      state.pickerResultsRequestId === state.pickerRequestId
+    );
+  }
+
+  async function loadIntervalPickerPage() {
+    const identity = currentDatasetIdentity();
+    if (!identity || !isIntervalBrowse()) return;
+    const q = state.pickerSearch.trim();
+    const offset = state.pickerOffset;
+    state.pickerRequestId += 1;
+    const requestId = state.pickerRequestId;
+    const token = {
+      datasetId: identity.datasetId,
+      datasetVersion: identity.datasetVersion,
+      pickerSession: state.pickerSession,
+      requestId,
+      query: q,
+      offset,
+      selectionGen: state.selectionGen,
+    };
+    state.pickerLoading = true;
+    state.pickerError = null;
+    // Stale results must not remain actionable while a newer search is pending.
+    state.pickerResults = null;
+    state.pickerResultsRequestId = 0;
+    state.pickerSelected = new Set();
+    renderPicker();
+    try {
+      /** @type {any} */
+      let payload;
+      if (q) {
+        payload = await apiGet(
+          `/api/datasets/${encodeURIComponent(identity.datasetId)}` +
+            `/versions/${encodeURIComponent(identity.datasetVersion)}/intervals/search` +
+            `?q=${encodeURIComponent(q)}&offset=${offset}&limit=${PICKER_PAGE_SIZE}`,
+        );
+      } else {
+        const listed = await apiGet(
+          `/api/datasets/${encodeURIComponent(identity.datasetId)}` +
+            `/versions/${encodeURIComponent(identity.datasetVersion)}/intervals` +
+            `?offset=${offset}&limit=${PICKER_PAGE_SIZE}`,
+        );
+        payload = {
+          query: "",
+          match_kind: "empty",
+          hits: (listed.intervals || []).map((interval) => ({
+            interval,
+            target_image_id: null,
+            target_frame_index: null,
+          })),
+          total: listed.total,
+          offset: listed.offset,
+          limit: listed.limit,
+        };
+      }
+      if (!intervalLogic().pickerRequestStillValid(token, pickerDeps())) return;
+      state.pickerResults = payload;
+      state.pickerResultsRequestId = requestId;
+      state.pickerTargetImages = new Map();
+      for (const hit of payload.hits || []) {
+        if (hit.target_image_id && hit.interval) {
+          state.pickerTargetImages.set(hit.interval.segment_id, hit.target_image_id);
+        }
+      }
+      state.pickerLoading = false;
+      renderPicker();
+    } catch (err) {
+      if (!intervalLogic().pickerRequestStillValid(token, pickerDeps())) return;
+      state.pickerLoading = false;
+      state.pickerResults = null;
+      state.pickerResultsRequestId = 0;
+      state.pickerError = errorMessage(err) || "Picker search failed.";
+      renderPicker();
+    }
   }
 
   function renderPicker() {
-    if (!dom.pickerGrid || !state.datasetDetail) return;
+    if (!dom.pickerGrid) return;
     clearChildren(dom.pickerGrid);
+    if (dom.pickerMatchInfo) {
+      dom.pickerMatchInfo.hidden = true;
+      clearChildren(dom.pickerMatchInfo);
+    }
+    if (dom.pickerPager) dom.pickerPager.hidden = true;
+
+    if (isIntervalBrowse()) {
+      renderIntervalPicker();
+      return;
+    }
+    if (!state.datasetDetail) return;
     const identity = currentDatasetIdentity();
     const q = state.pickerSearch.trim().toLowerCase();
     const images = Array.isArray(state.datasetDetail.images) ? state.datasetDetail.images : [];
@@ -1738,6 +2714,266 @@
       document.createTextNode(count === 0 ? "No images selected" : `${count} selected`),
     );
     dom.pickerAddBtn.disabled = count === 0;
+    if (dom.pickerAddAllBtn) {
+      dom.pickerAddAllBtn.hidden = true;
+      dom.pickerAddAllBtn.disabled = true;
+    }
+  }
+
+  function renderIntervalPicker() {
+    const identity = currentDatasetIdentity();
+    if (!identity || !dom.pickerGrid) return;
+
+    if (state.pickerLoading && !state.pickerResults) {
+      dom.pickerGrid.appendChild(el("p", { className: "muted", text: "Loading intervals…" }));
+    }
+    if (state.pickerError) {
+      dom.pickerGrid.appendChild(el("p", { className: "save-error", text: state.pickerError }));
+    }
+
+    const results = state.pickerResults;
+    const hits = results && Array.isArray(results.hits) ? results.hits : [];
+    if (dom.pickerMatchInfo && results) {
+      let info = "";
+      if (results.match_kind === "video") {
+        info = `Video match · ${results.total} interval(s)`;
+      } else if (results.match_kind === "image") {
+        info = "Image match · opens the owning interval at that frame";
+      } else if (results.match_kind === "none") {
+        info = "No intervals match.";
+      } else if (!state.pickerSearch.trim()) {
+        info = `Browsing intervals · ${results.total} total`;
+      }
+      if (info) {
+        clearChildren(dom.pickerMatchInfo);
+        dom.pickerMatchInfo.appendChild(document.createTextNode(info));
+        dom.pickerMatchInfo.hidden = false;
+      }
+    }
+
+    if (!state.pickerLoading && hits.length === 0 && !state.pickerError) {
+      dom.pickerGrid.appendChild(el("p", { className: "muted", text: "No intervals match." }));
+    }
+
+    for (const hit of hits) {
+      const interval = hit.interval;
+      if (!interval) continue;
+      const already = Boolean(findOpenInterval(interval.segment_id));
+      const selected = state.pickerSelected.has(interval.segment_id);
+      const btn = el("button", {
+        type: "button",
+        className: `picker-item${selected ? " selected" : ""}${already ? " already-open" : ""}`,
+        "aria-pressed": selected ? "true" : "false",
+      });
+      const thumbWrap = el("div", { className: "picker-thumb-wrap" });
+      const thumb = el("img", {
+        className: "picker-thumb",
+        alt: "",
+        loading: "lazy",
+        decoding: "async",
+      });
+      thumb.src = imageContentUrl(
+        identity.datasetId,
+        identity.datasetVersion,
+        interval.first_image_id,
+      );
+      thumb.addEventListener("error", () => {
+        thumb.remove();
+        thumbWrap.appendChild(el("span", { className: "muted", text: "Preview unavailable" }));
+      });
+      thumbWrap.appendChild(thumb);
+      btn.appendChild(thumbWrap);
+      btn.appendChild(el("div", { className: "picker-title-line", text: interval.title }));
+      btn.appendChild(
+        el("div", {
+          className: "picker-note",
+          text: `${interval.image_count} images · ${interval.video_filename}`,
+        }),
+      );
+      if (hit.target_image_id) {
+        btn.appendChild(
+          el("div", { className: "picker-note", text: `Target frame: ${hit.target_image_id}` }),
+        );
+      }
+      if (already) {
+        btn.appendChild(el("div", { className: "picker-note", text: "Already open" }));
+      }
+      btn.addEventListener("click", () => {
+        if (already) {
+          closeModal(dom.pickerModal);
+          void addOrFocusInterval(interval.segment_id, {
+            title: interval.title,
+            imageCount: interval.image_count,
+            targetImageId:
+              hit.target_image_id ||
+              state.pickerTargetImages.get(interval.segment_id) ||
+              null,
+          });
+          return;
+        }
+        if (state.pickerSelected.has(interval.segment_id)) {
+          state.pickerSelected.delete(interval.segment_id);
+        } else {
+          state.pickerSelected.add(interval.segment_id);
+        }
+        renderPicker();
+      });
+      dom.pickerGrid.appendChild(btn);
+    }
+
+    if (results && dom.pickerPager && dom.pickerPageLabel) {
+      const total = results.total || 0;
+      const limit = results.limit || PICKER_PAGE_SIZE;
+      const offset = results.offset || 0;
+      const page = Math.floor(offset / limit) + 1;
+      const pages = Math.max(1, Math.ceil(total / limit));
+      dom.pickerPager.hidden = total <= limit && offset === 0;
+      clearChildren(dom.pickerPageLabel);
+      dom.pickerPageLabel.appendChild(
+        document.createTextNode(`Page ${page} / ${pages} · ${total} result(s)`),
+      );
+      if (dom.pickerPrevPage) {
+        dom.pickerPrevPage.disabled = offset <= 0 || state.pickerLoading;
+      }
+      if (dom.pickerNextPage) {
+        dom.pickerNextPage.disabled = offset + limit >= total || state.pickerLoading;
+      }
+    }
+
+    const actionable = pickerResultsAreActionable();
+    const count = state.pickerSelected.size;
+    clearChildren(dom.pickerSelectionCount);
+    dom.pickerSelectionCount.appendChild(
+      document.createTextNode(
+        state.pickerLoading
+          ? "Search in progress…"
+          : count === 0
+            ? "None selected"
+            : `${count} selected`,
+      ),
+    );
+    dom.pickerAddBtn.disabled = !actionable || count === 0;
+    if (dom.pickerAddAllBtn) {
+      const canAddAll =
+        actionable &&
+        results &&
+        results.match_kind === "video" &&
+        Array.isArray(results.hits) &&
+        results.hits.length > 0;
+      dom.pickerAddAllBtn.hidden = false;
+      dom.pickerAddAllBtn.disabled = !canAddAll;
+    }
+  }
+
+  function batchAddDeps() {
+    return {
+      currentIdentity: currentDatasetIdentity,
+      selectionGen: () => state.selectionGen,
+      activeBatchId: () => state.activeBatchId,
+    };
+  }
+
+  async function addSelectedIntervalsFromPicker() {
+    if (!pickerResultsAreActionable()) {
+      showBanner("Picker results changed. Search again before adding intervals.", "warning");
+      return;
+    }
+    const identity = currentDatasetIdentity();
+    if (!identity) return;
+    const results = state.pickerResults;
+    const hits = results && Array.isArray(results.hits) ? results.hits : [];
+    const selected = Array.from(state.pickerSelected);
+    const targetMap = new Map(state.pickerTargetImages);
+    state.activeBatchId += 1;
+    const batchId = state.activeBatchId;
+    const token = {
+      datasetId: identity.datasetId,
+      datasetVersion: identity.datasetVersion,
+      selectionGen: state.selectionGen,
+      batchId,
+    };
+    closeModal(dom.pickerModal);
+    try {
+      for (const segmentId of selected) {
+        if (!intervalLogic().batchAddStillValid(token, batchAddDeps())) return;
+        const hit = hits.find((item) => item.interval && item.interval.segment_id === segmentId);
+        const interval = hit && hit.interval;
+        const outcome = await addOrFocusInterval(segmentId, {
+          title: interval ? interval.title : segmentId,
+          imageCount: interval ? interval.image_count : 0,
+          targetImageId: (hit && hit.target_image_id) || targetMap.get(segmentId) || null,
+        });
+        if (outcome && outcome.outcome === "error") {
+          showBanner(
+            outcome.errorMessage ||
+              errorMessage(outcome.error) ||
+              `Failed to open interval ${segmentId}.`,
+            "error",
+          );
+        }
+      }
+    } catch (err) {
+      if (!intervalLogic().batchAddStillValid(token, batchAddDeps())) return;
+      showBanner(errorMessage(err) || "Failed to add selected intervals.", "error");
+    }
+  }
+
+  async function addAllMatchingIntervalsFromPicker() {
+    if (!pickerResultsAreActionable()) {
+      showBanner("Picker results changed. Search again before adding intervals.", "warning");
+      return;
+    }
+    const identity = currentDatasetIdentity();
+    const results = state.pickerResults;
+    if (!identity || !results || results.match_kind !== "video") return;
+    const q = state.pickerSearch.trim();
+    state.activeBatchId += 1;
+    const batchId = state.activeBatchId;
+    const token = {
+      datasetId: identity.datasetId,
+      datasetVersion: identity.datasetVersion,
+      selectionGen: state.selectionGen,
+      batchId,
+    };
+    closeModal(dom.pickerModal);
+    try {
+      let offset = 0;
+      const limit = PICKER_PAGE_SIZE;
+      /** @type {any[]} */
+      const all = [];
+      while (offset < (results.total || 0)) {
+        if (!intervalLogic().batchAddStillValid(token, batchAddDeps())) return;
+        const page = await apiGet(
+          `/api/datasets/${encodeURIComponent(identity.datasetId)}` +
+            `/versions/${encodeURIComponent(identity.datasetVersion)}/intervals/search` +
+            `?q=${encodeURIComponent(q)}&offset=${offset}&limit=${limit}`,
+        );
+        if (!intervalLogic().batchAddStillValid(token, batchAddDeps())) return;
+        all.push(...(page.hits || []));
+        offset += limit;
+        if (!page.hits || page.hits.length === 0) break;
+      }
+      for (const hit of all) {
+        if (!intervalLogic().batchAddStillValid(token, batchAddDeps())) return;
+        if (!hit.interval) continue;
+        const outcome = await addOrFocusInterval(hit.interval.segment_id, {
+          title: hit.interval.title,
+          imageCount: hit.interval.image_count,
+          targetImageId: hit.target_image_id || null,
+        });
+        if (outcome && outcome.outcome === "error") {
+          showBanner(
+            outcome.errorMessage ||
+              errorMessage(outcome.error) ||
+              `Failed to open interval ${hit.interval.segment_id}.`,
+            "error",
+          );
+        }
+      }
+    } catch (err) {
+      if (!intervalLogic().batchAddStillValid(token, batchAddDeps())) return;
+      showBanner(errorMessage(err) || "Failed to add matching intervals.", "error");
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1748,6 +2984,56 @@
     if (!dom.summaryTableWrap) return;
     clearChildren(dom.summaryTableWrap);
     updateDraftNotices();
+    syncSummaryLoadBars();
+
+    if (!currentDatasetIdentity()) {
+      dom.summaryTableWrap.appendChild(
+        el("div", { className: "empty-state", text: state.loading ? "Loading…" : "No dataset selected." }),
+      );
+      if (dom.summaryRowCount) {
+        clearChildren(dom.summaryRowCount);
+      }
+      return;
+    }
+
+    if (isIntervalBrowse()) {
+      if (!state.summaryLoaded || !state.summary) {
+        dom.summaryTableWrap.appendChild(
+          el("div", {
+            className: "empty-state",
+            text: "Effective summary is not loaded. Use “Load effective summary” for ground-truth distribution counts. The per-image table is omitted for large interval datasets — open frames from Analytical.",
+          }),
+        );
+        if (dom.summaryRowCount) clearChildren(dom.summaryRowCount);
+        return;
+      }
+      const s = state.summary;
+      const box = el("div", { className: "empty-state" });
+      box.appendChild(
+        el("p", {
+          text: `Effective summary loaded for ${s.total_images} image(s). Per-image rows are not listed in interval browse mode.`,
+        }),
+      );
+      box.appendChild(
+        el("p", {
+          text: `Effective GT — absent (0): ${s.effective_ground_truth.label_0}; present (1): ${s.effective_ground_truth.label_1}`,
+        }),
+      );
+      box.appendChild(
+        el("p", {
+          className: "muted",
+          text: "Open intervals from Analytical to inspect individual frames. These counts use persisted reviews, not unsaved drafts.",
+        }),
+      );
+      dom.summaryTableWrap.appendChild(box);
+      if (dom.summaryRowCount) {
+        clearChildren(dom.summaryRowCount);
+        dom.summaryRowCount.appendChild(
+          document.createTextNode(`${s.total_images} images (counts only)`),
+        );
+      }
+      return;
+    }
 
     if (!state.datasetDetail) {
       dom.summaryTableWrap.appendChild(
@@ -1931,6 +3217,7 @@
     if (!dom.executiveContent) return;
     clearChildren(dom.executiveContent);
     updateDraftNotices();
+    syncSummaryLoadBars();
 
     if (state.loading) {
       dom.executiveContent.appendChild(
@@ -1939,6 +3226,16 @@
           text: state.selectedRunId
             ? `Loading summary for run ${state.selectedRunId}…`
             : "Loading dataset summary…",
+        }),
+      );
+      return;
+    }
+
+    if (isIntervalBrowse() && (!state.summaryLoaded || !state.summary)) {
+      dom.executiveContent.appendChild(
+        el("div", {
+          className: "empty-state",
+          text: "Executive summary requires the effective summary scan. Use “Load executive summary” — counts are not guessed from original dataset labels alone.",
         }),
       );
       return;
@@ -2335,12 +3632,37 @@
     dom.addFramesBtn.addEventListener("click", openPicker);
     dom.pickerSearch.addEventListener("input", () => {
       state.pickerSearch = dom.pickerSearch.value;
-      renderPicker();
+      if (isIntervalBrowse()) {
+        scheduleIntervalPickerSearch();
+      } else {
+        renderPicker();
+      }
     });
     dom.pickerAddBtn.addEventListener("click", () => {
+      if (isIntervalBrowse()) {
+        void addSelectedIntervalsFromPicker();
+        return;
+      }
       addCards(Array.from(state.pickerSelected));
       closeModal(dom.pickerModal);
     });
+    if (dom.pickerAddAllBtn) {
+      dom.pickerAddAllBtn.addEventListener("click", () => {
+        void addAllMatchingIntervalsFromPicker();
+      });
+    }
+    if (dom.pickerPrevPage) {
+      dom.pickerPrevPage.addEventListener("click", () => {
+        state.pickerOffset = Math.max(0, state.pickerOffset - PICKER_PAGE_SIZE);
+        void loadIntervalPickerPage();
+      });
+    }
+    if (dom.pickerNextPage) {
+      dom.pickerNextPage.addEventListener("click", () => {
+        state.pickerOffset += PICKER_PAGE_SIZE;
+        void loadIntervalPickerPage();
+      });
+    }
 
     document.querySelectorAll("[data-close='picker']").forEach((node) => {
       node.addEventListener("click", () => closeModal(dom.pickerModal));
@@ -2353,6 +3675,12 @@
       state.summarySearch = dom.summarySearch.value;
       renderSummary();
     });
+    if (dom.summaryLoadBtn) {
+      dom.summaryLoadBtn.addEventListener("click", () => loadSummaryExplicit({ force: true }));
+    }
+    if (dom.executiveLoadBtn) {
+      dom.executiveLoadBtn.addEventListener("click", () => loadSummaryExplicit({ force: true }));
+    }
 
     dom.viewerFit.addEventListener("click", () => fitViewer());
     dom.viewer100.addEventListener("click", () => {

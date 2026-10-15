@@ -85,7 +85,7 @@
         <div id="run-info-panel" class="run-info-panel" hidden></div>
         <div class="analytical-toolbar">
           <button type="button" id="add-frames-btn" class="btn btn-primary" disabled>
-            + Add frames
+            + Add intervals
           </button>
           <p class="toolbar-hint" id="analytical-hint"></p>
         </div>
@@ -101,7 +101,16 @@
         hidden
       >
         <div id="summary-draft-notice" class="notice" hidden></div>
-        <div class="summary-toolbar">
+        <div id="summary-load-bar" class="summary-load-bar" hidden>
+          <p class="muted" id="summary-load-hint">
+            Effective summary scans every image review. Load it explicitly for large datasets.
+          </p>
+          <button type="button" id="summary-load-btn" class="btn btn-secondary">
+            Load effective summary
+          </button>
+        </div>
+        <div id="summary-stale-notice" class="notice notice-warning" hidden></div>
+        <div class="summary-toolbar" id="summary-toolbar">
           <label class="field field-grow">
             <span class="field-label">Search</span>
             <input
@@ -124,11 +133,20 @@
         hidden
       >
         <div id="executive-draft-notice" class="notice" hidden></div>
+        <div id="executive-load-bar" class="summary-load-bar" hidden>
+          <p class="muted" id="executive-load-hint">
+            Executive figures use the effective summary scan. Load it explicitly when needed.
+          </p>
+          <button type="button" id="executive-load-btn" class="btn btn-secondary">
+            Load executive summary
+          </button>
+        </div>
+        <div id="executive-stale-notice" class="notice notice-warning" hidden></div>
         <div id="executive-content" class="executive-content"></div>
       </section>
     </main>
 
-    <!-- Add-frames picker -->
+    <!-- Add-intervals / frames picker -->
     <div
       id="picker-modal"
       class="modal"
@@ -140,20 +158,35 @@
       <div class="modal-backdrop" data-close="picker"></div>
       <div class="modal-panel picker-panel">
         <header class="modal-header">
-          <h2 id="picker-title">Add frames</h2>
+          <h2 id="picker-title">Add intervals</h2>
           <button type="button" class="btn btn-ghost" data-close="picker" aria-label="Close">
             Close
           </button>
         </header>
         <label class="field">
-          <span class="field-label">Search by image ID</span>
+          <span class="field-label" id="picker-search-label"
+            >Search video name, video ID, image ID, or display ID</span
+          >
           <input type="search" id="picker-search" autocomplete="off" />
         </label>
+        <div id="picker-match-info" class="muted picker-match-info" hidden></div>
         <div id="picker-grid" class="picker-grid"></div>
+        <div class="picker-pager" id="picker-pager" hidden>
+          <button type="button" id="picker-prev-page" class="btn btn-secondary btn-sm" disabled>
+            Previous
+          </button>
+          <span id="picker-page-label" class="muted"></span>
+          <button type="button" id="picker-next-page" class="btn btn-secondary btn-sm" disabled>
+            Next
+          </button>
+        </div>
         <footer class="modal-footer">
           <p id="picker-selection-count" class="muted"></p>
           <div class="footer-actions">
             <button type="button" class="btn btn-ghost" data-close="picker">Cancel</button>
+            <button type="button" id="picker-add-all-btn" class="btn btn-secondary" hidden disabled>
+              Add all matching intervals
+            </button>
             <button type="button" id="picker-add-btn" class="btn btn-primary" disabled>
               Add selected
             </button>
@@ -199,6 +232,7 @@
     </div>
 
     <script type="module" src="/ui-assets/register_save_logic.mjs"></script>
+    <script type="module" src="/ui-assets/register_interval_browse_logic.mjs"></script>
     <script src="/ui-assets/app.js" defer></script>
   </body>
 </html>

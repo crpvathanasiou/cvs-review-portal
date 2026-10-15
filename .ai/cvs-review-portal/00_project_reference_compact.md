@@ -1,6 +1,6 @@
 # CVS Review Portal — Compact Project Reference
 
-> **LEGACY DOCUMENT.** Compact summary of the inherited compliance/OpenSearch/AWS template. **Not** the current portal specification. Use [`08_portal_specification.md`](08_portal_specification.md) as the approved product and Step 1 source of truth. The note below about `00_project_reference.md` is historical only.
+> **LEGACY DOCUMENT.** Compact summary of the inherited compliance/OpenSearch/AWS template. **Not** the current portal specification. Reading order: [`../../README.md`](../../README.md). Current specification: [`08_portal_specification.md`](08_portal_specification.md). The note below about `00_project_reference.md` is historical only.
 
 ```text
 This document is a derived compact reference for implementation and AI-assisted development.

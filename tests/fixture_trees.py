@@ -29,7 +29,8 @@ def make_settings(**overrides: object) -> IsolatedSettings:
     return IsolatedSettings(**payload)  # type: ignore[arg-type]
 
 
-def _png(rgb: tuple[int, int, int] = (10, 20, 30)) -> bytes:
+def png_bytes(rgb: tuple[int, int, int] = (10, 20, 30)) -> bytes:
+    """Build a tiny deterministic PNG for fixtures and tests."""
     width = height = 2
     r, g, b = rgb
     raw = b"".join(b"\x00" + bytes([r, g, b]) * width for _ in range(height))
@@ -50,6 +51,10 @@ def _png(rgb: tuple[int, int, int] = (10, 20, 30)) -> bytes:
         + chunk(b"IDAT", compressed)
         + chunk(b"IEND", b"")
     )
+
+
+# Backward-compatible private alias used by older fixture helpers in this module.
+_png = png_bytes
 
 
 def _write_json(path: Path, payload: object) -> None:

@@ -1,6 +1,6 @@
 # 04 — Implementation Roadmap
 
-> **LEGACY ROADMAP.** Phases and tasks here target the inherited compliance/AWS/OpenSearch product. They are **not** the current portal roadmap. Approved three-step portal roadmap and Step 1 contracts live in [`08_portal_specification.md`](08_portal_specification.md).
+> **LEGACY ROADMAP.** Phases and tasks here target the inherited compliance/AWS/OpenSearch product. They are **not** the current portal roadmap. Reading order: [`../../README.md`](../../README.md). Current portal scope and behavior: [`08_portal_specification.md`](08_portal_specification.md).
 
 ## 1. Purpose
 

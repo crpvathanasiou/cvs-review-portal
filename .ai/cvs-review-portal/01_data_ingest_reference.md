@@ -1,6 +1,6 @@
 # 01 — Data Ingest Reference
 
-> **LEGACY DOCUMENT.** Data-ingest / OpenSearch content from the inherited compliance template. It does **not** describe the CVS Review Portal. Current specification: [`08_portal_specification.md`](08_portal_specification.md).
+> **LEGACY DOCUMENT.** Data-ingest / OpenSearch content from the inherited compliance template. It does **not** describe the CVS Review Portal. Reading order: [`../../README.md`](../../README.md). Current specification: [`08_portal_specification.md`](08_portal_specification.md).
 
 ## 1. Purpose and Document Authority
 

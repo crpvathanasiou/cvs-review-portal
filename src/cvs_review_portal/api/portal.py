@@ -5,11 +5,17 @@ from __future__ import annotations
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import ValidationError
 
 from cvs_review_portal.api.auth import require_json_mutation, require_principal
 from cvs_review_portal.api.deps import get_portal_service, get_review_service
+from cvs_review_portal.api.image_cache import (
+    apply_successful_image_cache_headers,
+    if_none_match_satisfied,
+    image_error_headers,
+    strong_etag_for_bytes,
+)
 from cvs_review_portal.api.review_schemas import (
     GetReviewResponse,
     ReviewStateResponse,
@@ -20,10 +26,16 @@ from cvs_review_portal.application.identity import AuthenticatedPrincipal
 from cvs_review_portal.application.portal_service import PortalReadService
 from cvs_review_portal.application.review_service import PortalReviewService
 from cvs_review_portal.application.views import (
+    DatasetBrowseView,
     DatasetDetailView,
     DatasetListView,
+    ImageFrameView,
+    IntervalFramesView,
+    IntervalListView,
+    IntervalSearchView,
     RunDetailView,
     RunListView,
+    RunOverviewView,
     SummaryView,
 )
 from cvs_review_portal.domain.errors import (
@@ -48,13 +60,19 @@ router = APIRouter(
 )
 
 
-def _http_error(exc: PortalError, status_code: int) -> HTTPException:
+def _http_error(
+    exc: PortalError,
+    status_code: int,
+    *,
+    no_store: bool = False,
+) -> HTTPException:
     detail: dict[str, str] = {"message": str(exc)}
     if exc.safe_context:
         detail["context"] = exc.safe_context
     if isinstance(exc, ReviewConflictError):
         detail["conflict_kind"] = exc.conflict_kind
-    return HTTPException(status_code=status_code, detail=detail)
+    headers = image_error_headers() if no_store else None
+    return HTTPException(status_code=status_code, detail=detail, headers=headers)
 
 
 def _review_state(loaded: LoadedReview) -> ReviewStateResponse:
@@ -183,9 +201,169 @@ def get_summary(
 
 
 @router.get(
+    "/datasets/{dataset_id}/versions/{dataset_version}/browse",
+    response_model=DatasetBrowseView,
+)
+def get_browse(
+    dataset_id: str,
+    dataset_version: str,
+    service: Annotated[PortalReadService, Depends(get_portal_service)],
+) -> DatasetBrowseView:
+    try:
+        validate_identifier(dataset_id, field="dataset_id")
+        validate_identifier(dataset_version, field="dataset_version")
+        return service.get_browse(dataset_id, dataset_version)
+    except ResourceNotFoundError as exc:
+        raise _http_error(exc, 404) from exc
+    except DataStoreUnavailableError as exc:
+        raise _http_error(exc, 503) from exc
+    except InvalidArtifactError as exc:
+        logger.exception("invalid_artifact op=get_browse context=%s", exc.safe_context)
+        raise _http_error(exc, 500) from exc
+    except InvalidIdentifierError as exc:
+        raise _http_error(exc, 422) from exc
+
+
+@router.get(
+    "/datasets/{dataset_id}/versions/{dataset_version}/intervals",
+    response_model=IntervalListView,
+)
+def list_intervals(
+    dataset_id: str,
+    dataset_version: str,
+    service: Annotated[PortalReadService, Depends(get_portal_service)],
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 24,
+) -> IntervalListView:
+    try:
+        validate_identifier(dataset_id, field="dataset_id")
+        validate_identifier(dataset_version, field="dataset_version")
+        return service.list_intervals(dataset_id, dataset_version, offset=offset, limit=limit)
+    except ResourceNotFoundError as exc:
+        raise _http_error(exc, 404) from exc
+    except DataStoreUnavailableError as exc:
+        raise _http_error(exc, 503) from exc
+    except InvalidArtifactError as exc:
+        logger.exception("invalid_artifact op=list_intervals context=%s", exc.safe_context)
+        raise _http_error(exc, 500) from exc
+    except InvalidIdentifierError as exc:
+        raise _http_error(exc, 422) from exc
+
+
+@router.get(
+    "/datasets/{dataset_id}/versions/{dataset_version}/intervals/search",
+    response_model=IntervalSearchView,
+)
+def search_intervals(
+    dataset_id: str,
+    dataset_version: str,
+    service: Annotated[PortalReadService, Depends(get_portal_service)],
+    q: Annotated[str, Query(min_length=0)] = "",
+    offset: Annotated[int, Query(ge=0)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 24,
+) -> IntervalSearchView:
+    try:
+        validate_identifier(dataset_id, field="dataset_id")
+        validate_identifier(dataset_version, field="dataset_version")
+        return service.search_intervals(
+            dataset_id, dataset_version, query=q, offset=offset, limit=limit
+        )
+    except ResourceNotFoundError as exc:
+        raise _http_error(exc, 404) from exc
+    except DataStoreUnavailableError as exc:
+        raise _http_error(exc, 503) from exc
+    except InvalidArtifactError as exc:
+        logger.exception("invalid_artifact op=search_intervals context=%s", exc.safe_context)
+        raise _http_error(exc, 500) from exc
+    except InvalidIdentifierError as exc:
+        raise _http_error(exc, 422) from exc
+
+
+@router.get(
+    "/datasets/{dataset_id}/versions/{dataset_version}/intervals/{segment_id}/frames",
+    response_model=IntervalFramesView,
+)
+def get_interval_frames(
+    dataset_id: str,
+    dataset_version: str,
+    segment_id: str,
+    service: Annotated[PortalReadService, Depends(get_portal_service)],
+) -> IntervalFramesView:
+    try:
+        validate_identifier(dataset_id, field="dataset_id")
+        validate_identifier(dataset_version, field="dataset_version")
+        validate_identifier(segment_id, field="segment_id")
+        return service.get_interval_frames(dataset_id, dataset_version, segment_id)
+    except ResourceNotFoundError as exc:
+        raise _http_error(exc, 404) from exc
+    except DataStoreUnavailableError as exc:
+        raise _http_error(exc, 503) from exc
+    except InvalidArtifactError as exc:
+        logger.exception(
+            "invalid_artifact op=get_interval_frames context=%s",
+            exc.safe_context,
+        )
+        raise _http_error(exc, 500) from exc
+    except InvalidIdentifierError as exc:
+        raise _http_error(exc, 422) from exc
+
+
+@router.get(
+    "/datasets/{dataset_id}/versions/{dataset_version}/images/{image_id}/view",
+    response_model=ImageFrameView,
+)
+def get_image_frame_view(
+    dataset_id: str,
+    dataset_version: str,
+    image_id: str,
+    service: Annotated[PortalReadService, Depends(get_portal_service)],
+    run_id: Annotated[str | None, Query()] = None,
+) -> ImageFrameView:
+    try:
+        validate_identifier(dataset_id, field="dataset_id")
+        validate_identifier(dataset_version, field="dataset_version")
+        validate_identifier(image_id, field="image_id")
+        if run_id is not None:
+            validate_identifier(run_id, field="run_id")
+        return service.get_image_frame_view(dataset_id, dataset_version, image_id, run_id=run_id)
+    except ResourceNotFoundError as exc:
+        raise _http_error(exc, 404) from exc
+    except DataStoreUnavailableError as exc:
+        raise _http_error(exc, 503) from exc
+    except InvalidArtifactError as exc:
+        logger.exception(
+            "invalid_artifact op=get_image_frame_view context=%s",
+            exc.safe_context,
+        )
+        raise _http_error(exc, 500) from exc
+    except InvalidIdentifierError as exc:
+        raise _http_error(exc, 422) from exc
+
+
+@router.get("/runs/{run_id}/overview", response_model=RunOverviewView)
+def get_run_overview(
+    run_id: str,
+    service: Annotated[PortalReadService, Depends(get_portal_service)],
+) -> RunOverviewView:
+    try:
+        validate_identifier(run_id, field="run_id")
+        return service.get_run_overview(run_id)
+    except ResourceNotFoundError as exc:
+        raise _http_error(exc, 404) from exc
+    except DataStoreUnavailableError as exc:
+        raise _http_error(exc, 503) from exc
+    except InvalidArtifactError as exc:
+        logger.exception("invalid_artifact op=get_run_overview context=%s", exc.safe_context)
+        raise _http_error(exc, 500) from exc
+    except InvalidIdentifierError as exc:
+        raise _http_error(exc, 422) from exc
+
+
+@router.get(
     "/datasets/{dataset_id}/versions/{dataset_version}/images/{image_id}/content",
 )
 def get_image_content(
+    request: Request,
     dataset_id: str,
     dataset_version: str,
     image_id: str,
@@ -195,20 +373,29 @@ def get_image_content(
         validate_identifier(dataset_id, field="dataset_id")
         validate_identifier(dataset_version, field="dataset_version")
         validate_identifier(image_id, field="image_id")
+        # Auth, catalog publication, membership, and path validation run above /
+        # inside the service before any 304 is considered.
         content, media_type = service.get_image_content(dataset_id, dataset_version, image_id)
-        return Response(content=content, media_type=media_type)
+        etag = strong_etag_for_bytes(content)
+        if if_none_match_satisfied(request.headers.get("if-none-match"), etag):
+            not_modified = Response(status_code=304, content=b"")
+            apply_successful_image_cache_headers(not_modified, etag=etag)
+            return not_modified
+        response = Response(content=content, media_type=media_type)
+        apply_successful_image_cache_headers(response, etag=etag)
+        return response
     except ResourceNotFoundError as exc:
-        raise _http_error(exc, 404) from exc
+        raise _http_error(exc, 404, no_store=True) from exc
     except DataStoreUnavailableError as exc:
-        raise _http_error(exc, 503) from exc
+        raise _http_error(exc, 503, no_store=True) from exc
     except InvalidArtifactError as exc:
         logger.exception(
             "invalid_artifact op=get_image_content context=%s",
             exc.safe_context,
         )
-        raise _http_error(exc, 500) from exc
+        raise _http_error(exc, 500, no_store=True) from exc
     except InvalidIdentifierError as exc:
-        raise _http_error(exc, 422) from exc
+        raise _http_error(exc, 422, no_store=True) from exc
 
 
 @router.get(

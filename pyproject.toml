@@ -16,6 +16,7 @@ pydantic-settings = "^2.4.0"
 filelock = "^4.1.1"
 azure-storage-blob = "^12.31.0"
 azure-identity = "^1.26.0"
+openpyxl = "^3.1.5"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.0"

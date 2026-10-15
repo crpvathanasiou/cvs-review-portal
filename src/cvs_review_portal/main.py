@@ -12,6 +12,7 @@ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoin
 from starlette.responses import Response
 
 from cvs_review_portal.api.deps import build_identity_provider, build_portal_store
+from cvs_review_portal.api.image_cache import image_error_headers, is_image_content_path
 from cvs_review_portal.api.portal import router as portal_router
 from cvs_review_portal.api.system import router as system_router
 from cvs_review_portal.api.ui import register_ui
@@ -40,14 +41,18 @@ class PortalAccessMiddleware(BaseHTTPMiddleware):
         try:
             provider.resolve(request)
         except AuthenticationError as exc:
+            headers = image_error_headers() if is_image_content_path(path) else None
             return JSONResponse(
                 status_code=401,
                 content={"detail": {"message": str(exc), "context": exc.safe_context}},
+                headers=headers,
             )
         except AuthorizationError as exc:
+            headers = image_error_headers() if is_image_content_path(path) else None
             return JSONResponse(
                 status_code=403,
                 content={"detail": {"message": str(exc), "context": exc.safe_context}},
+                headers=headers,
             )
         return await call_next(request)
 

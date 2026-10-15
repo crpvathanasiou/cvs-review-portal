@@ -2,13 +2,29 @@
 
 from __future__ import annotations
 
+from cvs_review_portal.application.interval_index import (
+    IntervalRecord,
+    build_interval_index,
+    dataset_has_provenance,
+    find_interval,
+    interval_title,
+    search_intervals,
+)
 from cvs_review_portal.application.ports import PortalDataStore
 from cvs_review_portal.application.views import (
+    DatasetBrowseView,
     DatasetDetailView,
     DatasetListItem,
     DatasetListView,
     EffectiveImageView,
     GroundTruthCounts,
+    ImageFrameView,
+    IntervalFrameMetaView,
+    IntervalFramesView,
+    IntervalListView,
+    IntervalMetaView,
+    IntervalSearchHitView,
+    IntervalSearchView,
     MetricsView,
     PredictionCoverage,
     PredictionView,
@@ -17,6 +33,7 @@ from cvs_review_portal.application.views import (
     RunImageView,
     RunListItem,
     RunListView,
+    RunOverviewView,
     SummaryView,
 )
 from cvs_review_portal.domain.errors import InvalidArtifactError, ResourceNotFoundError
@@ -31,6 +48,9 @@ from cvs_review_portal.domain.models import (
     PredictionsArtifact,
     RunManifest,
 )
+
+_DEFAULT_PICKER_PAGE = 24
+_MAX_PICKER_PAGE = 100
 
 
 class PortalReadService:
@@ -203,6 +223,220 @@ class PortalReadService:
             )
         return self._store.read_raw_image_bytes(
             dataset.dataset_id, dataset.dataset_version, image.raw_image_key
+        )
+
+    def get_browse(self, dataset_id: str, dataset_version: str) -> DatasetBrowseView:
+        """Dataset header + browse mode without loading per-image reviews."""
+        dataset = self._require_client_dataset(dataset_id, dataset_version)
+        has_intervals = dataset_has_provenance(dataset)
+        interval_count = len(build_interval_index(dataset)) if has_intervals else 0
+        return DatasetBrowseView(
+            dataset_id=dataset.dataset_id,
+            dataset_version=dataset.dataset_version,
+            display_name=dataset.display_name,
+            description=dataset.description,
+            image_count=len(dataset.images),
+            browse_mode="interval" if has_intervals else "image",
+            interval_count=interval_count,
+        )
+
+    def list_intervals(
+        self,
+        dataset_id: str,
+        dataset_version: str,
+        *,
+        offset: int = 0,
+        limit: int = _DEFAULT_PICKER_PAGE,
+    ) -> IntervalListView:
+        dataset = self._require_client_dataset(dataset_id, dataset_version)
+        offset, limit = _clamp_page(offset, limit)
+        records = build_interval_index(dataset)
+        page = records[offset : offset + limit]
+        return IntervalListView(
+            dataset_id=dataset.dataset_id,
+            dataset_version=dataset.dataset_version,
+            intervals=[self._interval_meta(dataset, record) for record in page],
+            total=len(records),
+            offset=offset,
+            limit=limit,
+        )
+
+    def search_intervals(
+        self,
+        dataset_id: str,
+        dataset_version: str,
+        *,
+        query: str,
+        offset: int = 0,
+        limit: int = _DEFAULT_PICKER_PAGE,
+    ) -> IntervalSearchView:
+        dataset = self._require_client_dataset(dataset_id, dataset_version)
+        offset, limit = _clamp_page(offset, limit)
+        records = build_interval_index(dataset)
+        match_kind, matched, image_hit = search_intervals(records, query)
+        total = len(matched)
+        page = matched[offset : offset + limit]
+        hits: list[IntervalSearchHitView] = []
+        for record in page:
+            target_image_id: str | None = None
+            target_frame_index: int | None = None
+            if (
+                match_kind == "image"
+                and image_hit is not None
+                and image_hit[0].segment_id == record.segment_id
+            ):
+                target_image_id = image_hit[0].frames[image_hit[1]].image_id
+                # API exposes 1-based frame position within the interval.
+                target_frame_index = image_hit[1] + 1
+            hits.append(
+                IntervalSearchHitView(
+                    interval=self._interval_meta(dataset, record),
+                    target_image_id=target_image_id,
+                    target_frame_index=target_frame_index,
+                )
+            )
+        return IntervalSearchView(
+            dataset_id=dataset.dataset_id,
+            dataset_version=dataset.dataset_version,
+            query=query,
+            match_kind=match_kind,
+            hits=hits,
+            total=total,
+            offset=offset,
+            limit=limit,
+        )
+
+    def get_interval_frames(
+        self, dataset_id: str, dataset_version: str, segment_id: str
+    ) -> IntervalFramesView:
+        dataset = self._require_client_dataset(dataset_id, dataset_version)
+        segment_id = validate_identifier(segment_id, field="segment_id")
+        record = find_interval(build_interval_index(dataset), segment_id)
+        if record is None:
+            raise ResourceNotFoundError(
+                "Interval not found in dataset version.",
+                safe_context=(
+                    f"dataset_id={dataset_id} dataset_version={dataset_version} "
+                    f"segment_id={segment_id}"
+                ),
+            )
+        frames = [
+            IntervalFrameMetaView(
+                image_id=frame.image_id,
+                frame_index=frame.frame_index,
+                display_id=frame.display_id,
+                position=index + 1,
+            )
+            for index, frame in enumerate(record.frames)
+        ]
+        return IntervalFramesView(
+            dataset_id=dataset.dataset_id,
+            dataset_version=dataset.dataset_version,
+            segment_id=record.segment_id,
+            video_id=record.video_id,
+            video_filename=record.video_filename,
+            start_seconds=record.start_seconds,
+            end_seconds=record.end_seconds,
+            title=interval_title(dataset.display_name, record),
+            image_count=record.image_count,
+            frames=frames,
+        )
+
+    def get_image_frame_view(
+        self,
+        dataset_id: str,
+        dataset_version: str,
+        image_id: str,
+        *,
+        run_id: str | None = None,
+    ) -> ImageFrameView:
+        """Effective state for one image only (optional prediction for a run)."""
+        catalog = self._load_catalog()
+        dataset = self._require_client_dataset(dataset_id, dataset_version)
+        image_id = validate_identifier(image_id, field="image_id")
+        image = dataset.get_image(image_id)
+        if image is None:
+            raise ResourceNotFoundError(
+                "Image not found in dataset version.",
+                safe_context=(
+                    f"dataset_id={dataset_id} dataset_version={dataset_version} "
+                    f"image_id={image_id}"
+                ),
+            )
+        effective = self._effective_image(dataset, image)
+        display_id = image.provenance.display_id if image.provenance else None
+        segment_id = image.provenance.segment_id if image.provenance else None
+        video_id = image.provenance.video_id if image.provenance else None
+        position: int | None = None
+        image_count: int | None = None
+        if segment_id is not None:
+            record = find_interval(build_interval_index(dataset), segment_id)
+            if record is not None:
+                image_count = record.image_count
+                for index, frame in enumerate(record.frames):
+                    if frame.image_id == image_id:
+                        position = index + 1
+                        break
+
+        prediction: PredictionView | None = None
+        if run_id is not None:
+            run = self._require_client_run(catalog, run_id)
+            if (
+                run.dataset_id != dataset.dataset_id
+                or run.dataset_version != dataset.dataset_version
+            ):
+                raise ResourceNotFoundError(
+                    "Run does not belong to the requested dataset version.",
+                    safe_context=f"run_id={run_id}",
+                )
+            self._ensure_run_dataset_published(catalog, run)
+            predictions = self._store.load_predictions(run)
+            self._validate_predictions(dataset, predictions)
+            prediction = _prediction_view(predictions.by_image_id().get(image_id))
+
+        return ImageFrameView(
+            image=effective,
+            display_id=display_id,
+            segment_id=segment_id,
+            video_id=video_id,
+            position=position,
+            image_count=image_count,
+            prediction=prediction,
+        )
+
+    def get_run_overview(self, run_id: str) -> RunOverviewView:
+        """Run metadata and metrics without composing per-image effective reviews."""
+        catalog = self._load_catalog()
+        run = self._require_client_run(catalog, run_id)
+        self._ensure_run_dataset_published(catalog, run)
+        dataset = self._load_published_dataset(
+            run.dataset_id, run.dataset_version, from_catalog=True
+        )
+        predictions = self._store.load_predictions(run)
+        self._validate_predictions(dataset, predictions)
+        metrics_view = self._load_metrics_view(run, dataset, predictions)
+        return RunOverviewView(
+            run_id=run.run_id,
+            dataset_id=run.dataset_id,
+            dataset_version=run.dataset_version,
+            model=run.model,
+            model_parameters=dict(run.model_parameters),
+            preprocessing=dict(run.preprocessing),
+            execution_description=run.execution_description,
+            executed_at=run.executed_at,
+            metrics=metrics_view,
+        )
+
+    def _interval_meta(self, dataset: DatasetVersion, record: IntervalRecord) -> IntervalMetaView:
+        return IntervalMetaView(
+            segment_id=record.segment_id,
+            video_id=record.video_id,
+            video_filename=record.video_filename,
+            start_seconds=record.start_seconds,
+            end_seconds=record.end_seconds,
+            image_count=record.image_count,
+            first_image_id=record.first_image_id,
+            title=interval_title(dataset.display_name, record),
         )
 
     def _load_catalog(self) -> Catalog:
@@ -406,3 +640,13 @@ def _prediction_coverage(
         predicted_label_0=label_0,
         predicted_label_1=label_1,
     )
+
+
+def _clamp_page(offset: int, limit: int) -> tuple[int, int]:
+    if offset < 0:
+        offset = 0
+    if limit < 1:
+        limit = _DEFAULT_PICKER_PAGE
+    if limit > _MAX_PICKER_PAGE:
+        limit = _MAX_PICKER_PAGE
+    return offset, limit
